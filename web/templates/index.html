@@ -39,20 +39,31 @@
         <button class="tab" onclick="switchTab('people', 'video', this)">Vídeo de ref.</button>
       </div>
 
-      <!-- Upload manual -->
+      <!-- Adicionar Fotos -->
       <div id="people-manual" class="tab-content active">
         <div class="form-row">
-          <div class="form-group" style="flex:1">
-            <label>Nome / Papel</label>
-            <input type="text" id="personName" placeholder="Ex: Pai da Noiva">
-          </div>
-          <label class="btn-upload" for="personPhotos">
-            Selecionar fotos
-          </label>
-          <input type="file" id="personPhotos" multiple accept="image/*">
-          <button class="btn btn-primary" id="addPersonBtn" onclick="addPerson()">Adicionar</button>
+          <label class="btn-upload" for="personPhotos">Selecionar fotos</label>
+          <input type="file" id="personPhotos" multiple accept="image/*" onchange="handlePhotoSelection(this)">
+          <span id="selectedFiles" style="font-size:13px; color:#888;"></span>
         </div>
-        <div id="selectedFiles" style="font-size:12px; color:#888; margin-bottom:8px;"></div>
+
+        <div id="manualTagger" style="display:none; margin-top:8px;">
+          <div class="tag-pool">
+            <span class="tag-pool-label">Tags criadas — clique uma e depois nas fotos para aplicar:</span>
+            <div id="tagPoolChips" class="tag-pool-chips"></div>
+            <div class="tag-pool-create">
+              <input type="text" id="newTagInput" placeholder="Nome da pessoa (ex: Pai da Noiva)" onkeydown="if(event.key==='Enter'){event.preventDefault();createTagFromInput();}">
+              <button class="btn" onclick="createTagFromInput()">+ Criar tag</button>
+            </div>
+          </div>
+
+          <div id="manualPhotoGrid" class="manual-photo-grid"></div>
+
+          <div class="manual-actions">
+            <button class="btn btn-primary" onclick="saveAllTaggedPhotos()">Salvar todos</button>
+            <button class="btn" onclick="cancelManualUpload()">Cancelar</button>
+          </div>
+        </div>
       </div>
 
       <!-- Apontar pasta -->

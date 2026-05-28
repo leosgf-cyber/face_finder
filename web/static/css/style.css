@@ -767,6 +767,155 @@ input[type="file"] {
   color: #666;
 }
 
+/* ========== MANUAL PHOTO TAGGER ========== */
+
+.tag-pool {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  padding: 12px;
+  margin: 12px 0;
+}
+
+.tag-pool-label {
+  display: block;
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 8px;
+}
+
+.tag-pool-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 22px;
+  margin-bottom: 10px;
+}
+
+.tag-pool-create {
+  display: flex;
+  gap: 6px;
+}
+
+.tag-pool-create input {
+  flex: 1;
+  padding: 7px 10px;
+  background: #0a0a0a;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 13px;
+}
+
+.tag-pool-create input:focus {
+  outline: none;
+  border-color: #d4a574;
+}
+
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 4px 4px 10px;
+  background: #2a2a2a;
+  border: 1px solid #3a3a3a;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.tag-chip:hover { background: #333; }
+
+.tag-chip.active {
+  background: #d4a574;
+  color: #0a0a0a;
+  border-color: #d4a574;
+}
+.tag-chip.active:hover { background: #c89865; }
+
+.tag-chip.small {
+  font-size: 12px;
+  padding: 2px 2px 2px 8px;
+}
+
+.tag-chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  color: inherit;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0.6;
+  padding: 0;
+}
+
+.tag-chip-x:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.manual-photo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.manual-photo-card {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.05s;
+}
+
+.manual-photo-card:hover { border-color: #d4a574; }
+.manual-photo-card:active { transform: scale(0.98); }
+
+.manual-photo-card.tagged {
+  border-color: #4a7a4a;
+}
+
+.manual-photo-thumb {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+}
+
+.manual-photo-tag {
+  padding: 8px;
+  text-align: center;
+  background: #0a0a0a;
+  font-size: 12px;
+  color: #888;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.manual-photo-tag.untagged {
+  color: #555;
+  font-style: italic;
+}
+
+.manual-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 @media (max-width: 600px) {
   .container { padding: 12px; }
   header h1 { font-size: 22px; }
@@ -774,4 +923,5 @@ input[type="file"] {
   .form-row { flex-direction: column; }
   .settings-row { grid-template-columns: 1fr 1fr; }
   .people-grid { grid-template-columns: 1fr; }
+  .manual-photo-grid { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); }
 }

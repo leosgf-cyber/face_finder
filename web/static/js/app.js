@@ -23,11 +23,7 @@ function updateSensitivityLabel(value) {
   }, 3000);
 })();
 
-document.getElementById("personPhotos").addEventListener("change", function () {
-  const count = this.files.length;
-  const el = document.getElementById("selectedFiles");
-  el.textContent = count > 0 ? count + " foto(s) selecionada(s)" : "";
-});
+// Selection is handled by handlePhotoSelection (see below).
 
 loadPeople();
 loadVideos();
@@ -89,46 +85,206 @@ async function loadPeople() {
   });
 }
 
-async function addPerson() {
-  const nameInput = document.getElementById("personName");
-  const photosInput = document.getElementById("personPhotos");
-  const name = nameInput.value.trim();
+// ========== MANUAL PHOTO TAGGER ==========
+// Lets the user upload N photos and apply name tags individually. Tags are
+// reusable: type a name once, then click it to stamp on any subsequent photo.
 
-  if (!name) {
-    alert("Digite o nome ou papel da pessoa.");
+var manualState = {
+  files: [],     // [{ id, file, thumbUrl, tag }]
+  tags: [],      // unique tag names in creation order
+  activeTag: null,
+};
+var _manualFileIdCounter = 0;
+
+function _renderManualPool() {
+  var pool = document.getElementById("tagPoolChips");
+  pool.innerHTML = "";
+  manualState.tags.forEach(function (name) {
+    var chip = document.createElement("span");
+    chip.className = "tag-chip" + (manualState.activeTag === name ? " active" : "");
+    chip.textContent = name;
+    chip.onclick = function () {
+      manualState.activeTag = (manualState.activeTag === name) ? null : name;
+      _renderManualPool();
+    };
+    var x = document.createElement("button");
+    x.className = "tag-chip-x";
+    x.textContent = "×";
+    x.title = "Remover tag";
+    x.onclick = function (e) {
+      e.stopPropagation();
+      _removePoolTag(name);
+    };
+    chip.appendChild(x);
+    pool.appendChild(chip);
+  });
+}
+
+function _renderManualGrid() {
+  var grid = document.getElementById("manualPhotoGrid");
+  grid.innerHTML = "";
+  manualState.files.forEach(function (f) {
+    var card = document.createElement("div");
+    card.className = "manual-photo-card" + (f.tag ? " tagged" : "");
+    card.onclick = function () {
+      if (manualState.activeTag) {
+        f.tag = manualState.activeTag;
+        _renderManualGrid();
+        _renderManualStatus();
+      }
+    };
+
+    var img = document.createElement("img");
+    img.src = f.thumbUrl;
+    img.className = "manual-photo-thumb";
+    card.appendChild(img);
+
+    var label = document.createElement("div");
+    label.className = "manual-photo-tag";
+    if (f.tag) {
+      var chip = document.createElement("span");
+      chip.className = "tag-chip small";
+      chip.textContent = f.tag;
+      var x = document.createElement("button");
+      x.className = "tag-chip-x";
+      x.textContent = "×";
+      x.title = "Tirar tag desta foto";
+      x.onclick = function (e) {
+        e.stopPropagation();
+        f.tag = null;
+        _renderManualGrid();
+        _renderManualStatus();
+      };
+      chip.appendChild(x);
+      label.appendChild(chip);
+    } else {
+      label.textContent = "Sem nome";
+      label.classList.add("untagged");
+    }
+    card.appendChild(label);
+    grid.appendChild(card);
+  });
+}
+
+function _renderManualStatus() {
+  var status = document.getElementById("selectedFiles");
+  var tagged = manualState.files.filter(function (f) { return f.tag; }).length;
+  if (manualState.files.length === 0) {
+    status.textContent = "";
+  } else {
+    status.textContent = manualState.files.length + " foto(s), " + tagged + " com tag";
+  }
+}
+
+function _renderManualTagger() {
+  _renderManualPool();
+  _renderManualGrid();
+  _renderManualStatus();
+}
+
+function handlePhotoSelection(input) {
+  var files = Array.from(input.files);
+  if (files.length === 0) return;
+
+  files.forEach(function (file) {
+    var reader = new FileReader();
+    reader.onload = function (e) {
+      manualState.files.push({
+        id: ++_manualFileIdCounter,
+        file: file,
+        thumbUrl: e.target.result,
+        tag: null,
+      });
+      _renderManualTagger();
+    };
+    reader.readAsDataURL(file);
+  });
+
+  document.getElementById("manualTagger").style.display = "block";
+  input.value = "";
+}
+
+function createTagFromInput() {
+  var inp = document.getElementById("newTagInput");
+  var name = inp.value.trim();
+  if (!name) return;
+  if (manualState.tags.indexOf(name) === -1) {
+    manualState.tags.push(name);
+  }
+  manualState.activeTag = name;
+  inp.value = "";
+  _renderManualPool();
+}
+
+function _removePoolTag(name) {
+  var inUse = manualState.files.filter(function (f) { return f.tag === name; }).length;
+  if (inUse > 0) {
+    if (!confirm('Remover "' + name + '"? ' + inUse + ' foto(s) ficarão sem tag.')) return;
+  }
+  manualState.tags = manualState.tags.filter(function (t) { return t !== name; });
+  manualState.files.forEach(function (f) { if (f.tag === name) f.tag = null; });
+  if (manualState.activeTag === name) manualState.activeTag = null;
+  _renderManualTagger();
+}
+
+async function saveAllTaggedPhotos() {
+  var tagged = manualState.files.filter(function (f) { return f.tag; });
+  if (tagged.length === 0) {
+    alert("Nenhuma foto com tag pra salvar.");
     return;
   }
 
-  if (photosInput.files.length === 0) {
-    alert("Selecione pelo menos uma foto.");
-    return;
+  var byName = {};
+  tagged.forEach(function (f) {
+    if (!byName[f.tag]) byName[f.tag] = [];
+    byName[f.tag].push(f);
+  });
+
+  var names = Object.keys(byName);
+  var totalSaved = 0;
+  var failed = [];
+
+  for (var i = 0; i < names.length; i++) {
+    var name = names[i];
+    var fd = new FormData();
+    fd.append("name", name);
+    byName[name].forEach(function (f) { fd.append("photos", f.file); });
+
+    try {
+      var res = await fetch("/api/people", { method: "POST", body: fd });
+      var data = await res.json();
+      if (data.error) {
+        failed.push(name + ": " + data.error);
+      } else {
+        totalSaved += data.photos_saved || byName[name].length;
+        manualState.files = manualState.files.filter(function (f) { return f.tag !== name; });
+      }
+    } catch (e) {
+      failed.push(name + ": erro de rede");
+    }
   }
 
-  const formData = new FormData();
-  formData.append("name", name);
-  for (let i = 0; i < photosInput.files.length; i++) {
-    formData.append("photos", photosInput.files[i]);
+  if (failed.length > 0) {
+    alert("Falhas:\n" + failed.join("\n"));
   }
 
-  const btn = document.getElementById("addPersonBtn");
-  btn.disabled = true;
-  btn.textContent = "Salvando...";
-
-  const res = await fetch("/api/people", { method: "POST", body: formData });
-  const data = await res.json();
-
-  btn.disabled = false;
-  btn.textContent = "Adicionar";
-
-  if (data.error) {
-    alert(data.error);
-    return;
+  if (manualState.files.length === 0) {
+    document.getElementById("manualTagger").style.display = "none";
+    manualState.tags = [];
+    manualState.activeTag = null;
+    document.getElementById("selectedFiles").textContent = totalSaved + " foto(s) salva(s) em " + names.length + " pessoa(s).";
+  } else {
+    _renderManualTagger();
   }
-
-  nameInput.value = "";
-  photosInput.value = "";
-  document.getElementById("selectedFiles").textContent = "";
   loadPeople();
+}
+
+function cancelManualUpload() {
+  manualState.files = [];
+  manualState.tags = [];
+  manualState.activeTag = null;
+  document.getElementById("manualTagger").style.display = "none";
+  document.getElementById("selectedFiles").textContent = "";
 }
 
 async function deletePerson(name) {
