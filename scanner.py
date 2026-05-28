@@ -25,6 +25,10 @@ PARALLEL_THRESHOLD = 30
 # Below this many uncached reference images, skip the pool for ref loading.
 REFERENCE_PARALLEL_THRESHOLD = 10
 
+# Bump when reference encoding logic changes (e.g., new augmentation) so old
+# caches written by a previous version are invalidated automatically.
+REF_CACHE_VERSION = 2
+
 
 def _ensure_models():
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -185,22 +189,69 @@ def _worker_process_frame(frame_index: int, frame_path: str):
     return frame_index, frame_path, faces
 
 
+def _paint_sunglasses(rgb, shape):
+    """Return a copy of rgb with a dark band painted over the eye region.
+
+    Uses dlib's 68-landmark model to position the band exactly where sunglasses
+    would sit. Landmarks 36-41 = left eye, 42-47 = right eye.
+    """
+    eye_pts = [shape.part(i) for i in range(36, 48)]
+    xs = [p.x for p in eye_pts]
+    ys = [p.y for p in eye_pts]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    eye_height = max(1, max_y - min_y)
+    eye_width = max(1, max_x - min_x)
+
+    # Pad to look like a sunglasses band rather than a pinstripe over the eyes.
+    pad_h = int(eye_height * 0.9)
+    pad_w = int(eye_width * 0.1)
+
+    h, w = rgb.shape[:2]
+    top = max(0, min_y - pad_h)
+    bottom = min(h, max_y + pad_h)
+    left = max(0, min_x - pad_w)
+    right = min(w, max_x + pad_w)
+
+    out = rgb.copy()
+    out[top:bottom, left:right] = (10, 10, 10)
+    return out
+
+
+def _augment_reference_encodings(rgb, shape, face_encoder):
+    """Generate synthetic-occlusion encodings for one reference face.
+
+    Today: a single sunglasses-painted variant. Structured to grow (hat
+    shadow, partial occlusion) without changing call sites.
+    """
+    augmented = []
+    try:
+        synthetic_rgb = _paint_sunglasses(rgb, shape)
+        synthetic_enc = np.array(
+            face_encoder.compute_face_descriptor(synthetic_rgb, shape)
+        )
+        augmented.append(synthetic_enc)
+    except Exception as e:
+        print(f"  Aviso: falha ao gerar versão com óculos: {e}")
+    return augmented
+
+
 def _worker_process_reference(args):
     """Process a single reference image. Worker-side helper.
 
     args: (img_path_str, name)
-    returns: (name, encoding_or_None, img_path_str)
+    returns: (name, encodings_list, img_path_str) — empty list if no face found
     """
     img_path_str, name = args
     img = cv2.imread(img_path_str)
     if img is None:
-        return name, None, img_path_str
+        return name, [], img_path_str
 
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     small_rgb, scale = _resize_for_detection(rgb)
     detected = _detect_faces(small_rgb, _WORKER_DETECTOR)
     if not detected:
-        return name, None, img_path_str
+        return name, [], img_path_str
 
     face = detected[0]
     if scale != 1.0:
@@ -210,11 +261,14 @@ def _worker_process_reference(args):
             int(face.right() / scale),
             int(face.bottom() / scale),
         )
-        shape = _WORKER_SHAPE_PREDICTOR(rgb, orig_face)
     else:
-        shape = _WORKER_SHAPE_PREDICTOR(rgb, face)
-    encoding = np.array(_WORKER_FACE_ENCODER.compute_face_descriptor(rgb, shape))
-    return name, encoding, img_path_str
+        orig_face = face
+    shape = _WORKER_SHAPE_PREDICTOR(rgb, orig_face)
+    bare = np.array(_WORKER_FACE_ENCODER.compute_face_descriptor(rgb, shape))
+
+    encodings = [bare]
+    encodings.extend(_augment_reference_encodings(rgb, shape, _WORKER_FACE_ENCODER))
+    return name, encodings, img_path_str
 
 
 def _resize_for_detection(rgb, max_width=1200):
@@ -294,13 +348,20 @@ def load_references(references_dir: str, tolerance: float = 0.6) -> dict:
     ref_files = _get_ref_files(ref_dir, extensions)
 
     if _cache_is_valid(cache_path, ref_files):
-        print("Carregando referências do cache...")
-        with open(cache_path, "rb") as f:
-            people = pickle.load(f)
-        print(f"Referências carregadas (cache): {len(people)} pessoa(s)")
-        for name, encs in people.items():
-            print(f"  - {name}: {len(encs)} foto(s)")
-        return people
+        try:
+            with open(cache_path, "rb") as f:
+                cached = pickle.load(f)
+            if isinstance(cached, dict) and cached.get("version") == REF_CACHE_VERSION:
+                people = cached["people"]
+                print("Carregando referências do cache...")
+                print(f"Referências carregadas (cache): {len(people)} pessoa(s)")
+                for name, encs in people.items():
+                    print(f"  - {name}: {len(encs)} encoding(s)")
+                return people
+            else:
+                print("Cache desatualizado, recomputando referências...")
+        except Exception as e:
+            print(f"Aviso: cache inválido ({e}); recomputando.")
 
     subdirs = [d for d in ref_dir.iterdir() if d.is_dir()]
     uses_folders = len(subdirs) > 0
@@ -343,14 +404,14 @@ def load_references(references_dir: str, tolerance: float = 0.6) -> dict:
             print(f"  Aviso: pool falhou ({e}); caindo pra single-process")
             use_pool = False
         else:
-            for name, encoding, img_path_str in ordered_results:
-                if encoding is None:
+            for name, encodings, img_path_str in ordered_results:
+                if not encodings:
                     print(
                         f"  Aviso: nenhum rosto encontrado em "
                         f"'{Path(img_path_str).name}', pulando."
                     )
                     continue
-                people.setdefault(name, []).append(encoding)
+                people.setdefault(name, []).extend(encodings)
 
     if not use_pool:
         detector, shape_predictor, face_encoder = _get_detector_and_encoder()
@@ -366,14 +427,14 @@ def load_references(references_dir: str, tolerance: float = 0.6) -> dict:
 
     try:
         with open(cache_path, "wb") as f:
-            pickle.dump(people, f)
+            pickle.dump({"version": REF_CACHE_VERSION, "people": people}, f)
         print("Cache de referências salvo.")
     except Exception as e:
         print(f"Aviso: não foi possível salvar cache: {e}")
 
     print(f"Referências carregadas: {len(people)} pessoa(s)")
     for name, encs in people.items():
-        print(f"  - {name}: {len(encs)} foto(s)")
+        print(f"  - {name}: {len(encs)} encoding(s)")
 
     return people
 
@@ -385,16 +446,29 @@ def _load_face(img_path, name, people, detector, shape_predictor, face_encoder):
         return
 
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    # _encode_faces already uses _resize_for_detection internally
-    encodings = _encode_faces(rgb, detector, shape_predictor, face_encoder)
-
-    if not encodings:
+    small_rgb, scale = _resize_for_detection(rgb)
+    detected = _detect_faces(small_rgb, detector)
+    if not detected:
         print(f"  Aviso: nenhum rosto encontrado em '{img_path.name}', pulando.")
         return
 
+    face = detected[0]
+    if scale != 1.0:
+        orig_face = dlib.rectangle(
+            int(face.left() / scale),
+            int(face.top() / scale),
+            int(face.right() / scale),
+            int(face.bottom() / scale),
+        )
+    else:
+        orig_face = face
+    shape = shape_predictor(rgb, orig_face)
+    bare = np.array(face_encoder.compute_face_descriptor(rgb, shape))
+
     if name not in people:
         people[name] = []
-    people[name].append(encodings[0])
+    people[name].append(bare)
+    people[name].extend(_augment_reference_encodings(rgb, shape, face_encoder))
 
 
 def _frames_are_similar(frame_a, frame_b, threshold=0.95):
