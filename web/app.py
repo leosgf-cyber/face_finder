@@ -559,6 +559,113 @@ def _scan_folder_job(scan_id, saved_photos, saved_videos, upload_dir, cluster_to
         scan_jobs[scan_id]["error"] = str(e)
 
 
+@app.route("/api/detect-photo-faces", methods=["POST"])
+def detect_photo_faces():
+    """Detect faces in uploaded photos, save crops to a temp session dir.
+
+    Used by the manual "Adicionar Fotos" tagger to operate at face granularity:
+    one card per detected face, not one card per uploaded photo. This lets the
+    user upload group photos and tag each face individually.
+    """
+    files = [f for f in request.files.getlist("photos") if f.filename]
+    if not files:
+        return jsonify({"error": "Nenhuma foto recebida"}), 400
+
+    detect_id = uuid.uuid4().hex[:8]
+    temp_dir = RESULTS_DIR / f"detect_{detect_id}"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    detector, shape_predictor, face_encoder = _get_detector_and_encoder()
+
+    face_records = []
+    photos_with_no_faces = 0
+    photos_processed = 0
+
+    for f in files:
+        fname = Path(f.filename).name
+        if Path(fname).suffix.lower() not in PHOTO_EXTENSIONS:
+            continue
+        photos_processed += 1
+        photo_path = temp_dir / fname
+        f.save(str(photo_path))
+
+        face_dicts = _detect_faces_in_image(
+            photo_path, detector, shape_predictor, face_encoder, fname
+        )
+        if not face_dicts:
+            photos_with_no_faces += 1
+            continue
+
+        for face in face_dicts:
+            face_id = uuid.uuid4().hex[:12]
+            crop_path = temp_dir / f"face_{face_id}.jpg"
+            cv2.imwrite(str(crop_path), face["crop"])
+            face_records.append({
+                "face_id": face_id,
+                "source_photo": fname,
+                "crop_url": f"/api/detect-crop/{detect_id}/{face_id}",
+            })
+
+    return jsonify({
+        "detect_id": detect_id,
+        "faces": face_records,
+        "photos_with_no_faces": photos_with_no_faces,
+        "total_photos": photos_processed,
+    })
+
+
+@app.route("/api/detect-crop/<detect_id>/<face_id>")
+def get_detect_crop(detect_id, face_id):
+    safe_dir = RESULTS_DIR / f"detect_{detect_id}"
+    if not safe_dir.exists():
+        return jsonify({"error": "Não encontrado"}), 404
+    return send_from_directory(str(safe_dir), f"face_{face_id}.jpg")
+
+
+@app.route("/api/save-tagged-faces", methods=["POST"])
+def save_tagged_faces():
+    """Persist tagged face crops into the references library.
+
+    Each crop becomes one reference image under references/<name>/. The
+    encodings cache is invalidated automatically via mtime on the next load.
+    """
+    data = request.get_json(silent=True) or {}
+    detect_id = data.get("detect_id", "")
+    assignments = data.get("assignments", [])
+
+    temp_dir = RESULTS_DIR / f"detect_{detect_id}"
+    if not temp_dir.exists():
+        return jsonify({"error": "Sessão de detecção expirada"}), 404
+
+    saved_by_name = {}
+    for a in assignments:
+        face_id = a.get("face_id", "")
+        name = (a.get("name") or "").strip()
+        if not face_id or not name:
+            continue
+        # Defensive: reject path-traversal in either field
+        if "/" in face_id or "\\" in face_id or "/" in name or "\\" in name:
+            continue
+        crop_path = temp_dir / f"face_{face_id}.jpg"
+        if not crop_path.exists():
+            continue
+        person_dir = REFERENCES_DIR / name
+        person_dir.mkdir(parents=True, exist_ok=True)
+        existing = sum(
+            1 for p in person_dir.iterdir()
+            if p.suffix.lower() in PHOTO_EXTENSIONS
+        )
+        dest = person_dir / f"{name}_{existing + 1}.jpg"
+        shutil.copy2(str(crop_path), str(dest))
+        saved_by_name[name] = saved_by_name.get(name, 0) + 1
+
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    return jsonify({
+        "saved": saved_by_name,
+        "total": sum(saved_by_name.values()),
+    })
+
+
 @app.route("/api/scan-status/<scan_id>", methods=["GET"])
 def scan_status(scan_id):
     if scan_id not in scan_jobs:

@@ -85,12 +85,15 @@ async function loadPeople() {
   });
 }
 
-// ========== MANUAL PHOTO TAGGER ==========
-// Lets the user upload N photos and apply name tags individually. Tags are
-// reusable: type a name once, then click it to stamp on any subsequent photo.
+// ========== MANUAL FACE TAGGER ==========
+// User uploads photos. Server detects faces in each photo and returns one crop
+// per face — the grid shows one card per FACE (not per file), so group photos
+// expand into multiple taggable cards. Tags are reusable: type a name once,
+// then click it to stamp on any subsequent face.
 
 var manualState = {
-  files: [],     // [{ id, file, thumbUrl, tag }]
+  detectId: null,
+  files: [],     // [{ id, face_id, thumbUrl, sourcePhoto, tag }]
   tags: [],      // unique tag names in creation order
   activeTag: null,
 };
@@ -139,6 +142,16 @@ function _renderManualGrid() {
     img.className = "manual-photo-thumb";
     card.appendChild(img);
 
+    if (f.sourcePhoto) {
+      var src = document.createElement("div");
+      src.className = "manual-photo-source";
+      src.title = f.sourcePhoto;
+      src.textContent = f.sourcePhoto.length > 22
+        ? f.sourcePhoto.substring(0, 20) + "…"
+        : f.sourcePhoto;
+      card.appendChild(src);
+    }
+
     var label = document.createElement("div");
     label.className = "manual-photo-tag";
     if (f.tag) {
@@ -182,26 +195,59 @@ function _renderManualTagger() {
   _renderManualStatus();
 }
 
-function handlePhotoSelection(input) {
+async function handlePhotoSelection(input) {
   var files = Array.from(input.files);
   if (files.length === 0) return;
 
-  files.forEach(function (file) {
-    var reader = new FileReader();
-    reader.onload = function (e) {
-      manualState.files.push({
-        id: ++_manualFileIdCounter,
-        file: file,
-        thumbUrl: e.target.result,
-        tag: null,
-      });
-      _renderManualTagger();
-    };
-    reader.readAsDataURL(file);
-  });
+  manualState.files = [];
+  manualState.tags = [];
+  manualState.activeTag = null;
+  manualState.detectId = null;
 
   document.getElementById("manualTagger").style.display = "block";
-  input.value = "";
+  document.getElementById("selectedFiles").textContent =
+    "Enviando " + files.length + " foto(s) e detectando rostos…";
+  _renderManualTagger();
+
+  var fd = new FormData();
+  files.forEach(function (f) { fd.append("photos", f); });
+
+  try {
+    var res = await fetch("/api/detect-photo-faces", { method: "POST", body: fd });
+    var data = await res.json();
+    if (data.error) {
+      alert(data.error);
+      cancelManualUpload();
+      input.value = "";
+      return;
+    }
+
+    manualState.detectId = data.detect_id;
+    manualState.files = (data.faces || []).map(function (f) {
+      return {
+        id: ++_manualFileIdCounter,
+        face_id: f.face_id,
+        thumbUrl: f.crop_url,
+        sourcePhoto: f.source_photo,
+        tag: null,
+      };
+    });
+
+    var msg = manualState.files.length + " rosto(s) detectado(s) em " + data.total_photos + " foto(s)";
+    if (data.photos_with_no_faces > 0) {
+      msg += " · " + data.photos_with_no_faces + " sem rostos";
+    }
+    if (manualState.files.length === 0) {
+      msg = "Nenhum rosto detectado. Tente fotos com rostos mais visíveis ou maiores.";
+    }
+    document.getElementById("selectedFiles").textContent = msg;
+    _renderManualTagger();
+  } catch (e) {
+    alert("Erro ao enviar fotos: " + e.message);
+    cancelManualUpload();
+  } finally {
+    input.value = "";
+  }
 }
 
 function createTagFromInput() {
@@ -230,59 +276,53 @@ function _removePoolTag(name) {
 async function saveAllTaggedPhotos() {
   var tagged = manualState.files.filter(function (f) { return f.tag; });
   if (tagged.length === 0) {
-    alert("Nenhuma foto com tag pra salvar.");
+    alert("Nenhum rosto com tag pra salvar.");
+    return;
+  }
+  if (!manualState.detectId) {
+    alert("Sessão de detecção não encontrada. Selecione as fotos novamente.");
     return;
   }
 
-  var byName = {};
-  tagged.forEach(function (f) {
-    if (!byName[f.tag]) byName[f.tag] = [];
-    byName[f.tag].push(f);
+  var assignments = tagged.map(function (f) {
+    return { face_id: f.face_id, name: f.tag };
   });
 
-  var names = Object.keys(byName);
-  var totalSaved = 0;
-  var failed = [];
-
-  for (var i = 0; i < names.length; i++) {
-    var name = names[i];
-    var fd = new FormData();
-    fd.append("name", name);
-    byName[name].forEach(function (f) { fd.append("photos", f.file); });
-
-    try {
-      var res = await fetch("/api/people", { method: "POST", body: fd });
-      var data = await res.json();
-      if (data.error) {
-        failed.push(name + ": " + data.error);
-      } else {
-        totalSaved += data.photos_saved || byName[name].length;
-        manualState.files = manualState.files.filter(function (f) { return f.tag !== name; });
-      }
-    } catch (e) {
-      failed.push(name + ": erro de rede");
+  try {
+    var res = await fetch("/api/save-tagged-faces", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        detect_id: manualState.detectId,
+        assignments: assignments,
+      }),
+    });
+    var data = await res.json();
+    if (data.error) {
+      alert(data.error);
+      return;
     }
-  }
 
-  if (failed.length > 0) {
-    alert("Falhas:\n" + failed.join("\n"));
-  }
-
-  if (manualState.files.length === 0) {
+    var saved = data.saved || {};
+    var names = Object.keys(saved);
     document.getElementById("manualTagger").style.display = "none";
+    document.getElementById("selectedFiles").textContent =
+      (data.total || 0) + " rosto(s) salvo(s) em " + names.length + " pessoa(s).";
+    manualState.files = [];
     manualState.tags = [];
     manualState.activeTag = null;
-    document.getElementById("selectedFiles").textContent = totalSaved + " foto(s) salva(s) em " + names.length + " pessoa(s).";
-  } else {
-    _renderManualTagger();
+    manualState.detectId = null;
+    loadPeople();
+  } catch (e) {
+    alert("Erro ao salvar: " + e.message);
   }
-  loadPeople();
 }
 
 function cancelManualUpload() {
   manualState.files = [];
   manualState.tags = [];
   manualState.activeTag = null;
+  manualState.detectId = null;
   document.getElementById("manualTagger").style.display = "none";
   document.getElementById("selectedFiles").textContent = "";
 }
