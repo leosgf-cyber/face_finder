@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Parallel Face Scanning — Design</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --surface: #111111;
+    --surface-2: #161616;
+    --border: #1f1f1f;
+    --border-2: #2a2a2a;
+    --text: #f5f5f5;
+    --text-dim: #a0a0a0;
+    --text-mute: #6b6b6b;
+    --accent: #d4a574;
+    --accent-dim: #8a6f4f;
+    --success: #4ade80;
+    --warn: #fbbf24;
+    --danger: #f87171;
+    --radius: 12px;
+    --radius-sm: 8px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, 'SF Pro Text', 'Inter', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.65;
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .container { max-width: 820px; margin: 0 auto; padding: 80px 32px 120px; }
+  .hero { border-bottom: 1px solid var(--border); padding-bottom: 48px; margin-bottom: 56px; }
+  .crumb { font-size: 12px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--accent); font-weight: 600; margin-bottom: 16px; }
+  h1 { font-size: 42px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; margin-bottom: 20px; }
+  .subtitle { font-size: 18px; color: var(--text-dim); line-height: 1.5; max-width: 640px; }
+  .meta-row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 32px; }
+  .badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; background: var(--surface); border: 1px solid var(--border-2); border-radius: 999px; font-size: 13px; color: var(--text-dim); }
+  .badge.status { color: var(--warn); border-color: rgba(251, 191, 36, 0.3); background: rgba(251, 191, 36, 0.06); }
+  .badge.warn { color: var(--warn); border-color: rgba(251, 191, 36, 0.4); background: rgba(251, 191, 36, 0.08); font-weight: 600; letter-spacing: 0.04em; }
+  .badge.success { color: var(--success); border-color: rgba(74, 222, 128, 0.3); background: rgba(74, 222, 128, 0.06); }
+  .badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  section { margin-bottom: 56px; }
+  h2 { font-size: 24px; font-weight: 600; letter-spacing: -0.01em; margin-bottom: 20px; color: var(--text); }
+  h3 { font-size: 16px; font-weight: 600; margin-top: 28px; margin-bottom: 12px; color: var(--text); }
+  p { margin-bottom: 14px; color: var(--text-dim); }
+  p strong, li strong { color: var(--text); font-weight: 600; }
+  ul, ol { padding-left: 0; margin-bottom: 16px; list-style: none; }
+  ul li, ol li { position: relative; padding-left: 22px; margin-bottom: 10px; color: var(--text-dim); }
+  ul li::before { content: ""; position: absolute; left: 4px; top: 11px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent-dim); }
+  ol { counter-reset: list-counter; }
+  ol li { counter-increment: list-counter; }
+  ol li::before { content: counter(list-counter); position: absolute; left: 0; top: 0; width: 18px; height: 18px; font-size: 11px; font-weight: 600; color: var(--accent); background: rgba(212, 165, 116, 0.1); border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-top: 4px; }
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 18px; }
+  .stat .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-mute); margin-bottom: 6px; }
+  .stat .value { font-size: 20px; font-weight: 600; color: var(--text); }
+  .stat .value.accent { color: var(--accent); }
+  .table-wrap { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead { background: var(--surface); }
+  th { text-align: left; padding: 12px 16px; font-weight: 600; color: var(--text); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; border-bottom: 1px solid var(--border-2); }
+  td { padding: 12px 16px; border-bottom: 1px solid var(--border); color: var(--text-dim); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--surface); }
+  .callout { background: var(--surface); border: 1px solid var(--border-2); border-left: 3px solid var(--accent); border-radius: var(--radius-sm); padding: 16px 20px; margin-bottom: 16px; }
+  .callout.warn { border-left-color: var(--warn); background: rgba(251, 191, 36, 0.04); }
+  .callout.success { border-left-color: var(--success); background: rgba(74, 222, 128, 0.04); }
+  .callout .title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; color: var(--accent); margin-bottom: 6px; }
+  .callout.warn .title { color: var(--warn); }
+  .callout.success .title { color: var(--success); }
+  .callout p { margin-bottom: 0; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  @media (max-width: 640px) { .two-col { grid-template-columns: 1fr; } .container { padding: 48px 20px 80px; } h1 { font-size: 32px; } }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px; }
+  .panel h3 { margin-top: 0; display: flex; align-items: center; gap: 8px; }
+  .panel.goal h3 { color: var(--success); }
+  .panel.nongoal h3 { color: var(--danger); }
+  .panel h3 .icon { width: 20px; height: 20px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
+  .panel.goal h3 .icon { background: rgba(74, 222, 128, 0.15); color: var(--success); }
+  .panel.nongoal h3 .icon { background: rgba(248, 113, 113, 0.15); color: var(--danger); }
+  .panel ul li::before { background: var(--text-mute); }
+  .flow { display: flex; align-items: center; justify-content: center; gap: 16px; padding: 32px 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 20px; flex-wrap: wrap; }
+  .flow-node { background: var(--surface-2); border: 1px solid var(--border-2); border-radius: var(--radius-sm); padding: 14px 18px; text-align: center; min-width: 140px; }
+  .flow-node .icon { font-size: 20px; margin-bottom: 6px; display: block; }
+  .flow-node .label { font-size: 13px; font-weight: 500; color: var(--text); }
+  .flow-node .sub { font-size: 11px; color: var(--text-mute); margin-top: 3px; }
+  .flow-arrow { color: var(--accent); font-size: 20px; }
+  footer { margin-top: 80px; padding-top: 32px; border-top: 1px solid var(--border); text-align: center; color: var(--text-mute); font-size: 13px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <header class="hero">
+    <div class="crumb">Spec · Approved</div>
+    <h1>Parallel Face<br>Scanning</h1>
+    <p class="subtitle">Use every core the Mac has during a scan, and show matches as they're found instead of only at the end of each video.</p>
+    <div class="meta-row">
+      <span class="badge status"><span class="dot"></span>Design approved</span>
+      <span class="badge">2026-05-28</span>
+      <span class="badge">Apple Silicon · 16GB+</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>The shift</h2>
+    <p>Today, the scan runs on a single core. On an 8-core M-series Mac that means roughly <strong>12% of the machine's CPU</strong> is doing the work while the other 88% sits idle. This change spreads the workload across all available performance cores and adds live feedback to the UI while a scan is running.</p>
+    <div class="stat-grid">
+      <div class="stat"><div class="label">Today</div><div class="value">1 core</div></div>
+      <div class="stat"><div class="label">After</div><div class="value accent">Up to 8 cores</div></div>
+      <div class="stat"><div class="label">Memory cost</div><div class="value">~800 MB</div></div>
+      <div class="stat"><div class="label">New dependencies</div><div class="value">None</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Scope</h2>
+    <div class="two-col">
+      <div class="panel goal">
+        <h3><span class="icon">✓</span> In scope</h3>
+        <ul>
+          <li>Parallel face scanning across all available cores</li>
+          <li>Live frame counter shown during a scan</li>
+          <li>Matches streamed into the UI as they're found, not in one batch at the end</li>
+          <li>Parallel reference loading (same change, same win for big reference folders)</li>
+        </ul>
+      </div>
+      <div class="panel nongoal">
+        <h3><span class="icon">✕</span> Not in this change</h3>
+        <ul>
+          <li>GPU acceleration</li>
+          <li>Distributed / multi-machine scanning</li>
+          <li>Migration to a queue-based job system (deferred until the product becomes SaaS)</li>
+          <li>Smart frame extraction by scene cuts (separate backlog item)</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>How a scan flows</h2>
+    <div class="flow">
+      <div class="flow-node"><span class="icon">🎞️</span><div class="label">Dedup frames</div><div class="sub">Skip near-duplicates</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node"><span class="icon">⚡</span><div class="label">Dispatch to workers</div><div class="sub">One frame per task</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node"><span class="icon">🧠</span><div class="label">Detect &amp; encode</div><div class="sub">In parallel</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-node"><span class="icon">🎯</span><div class="label">Match &amp; report</div><div class="sub">Streamed to UI</div></div>
+    </div>
+    <p>Each worker loads the face-detection model once and reuses it for every frame it handles. Frames come back as they finish — the UI updates the moment a match is confirmed.</p>
+  </section>
+
+  <section>
+    <h2>Live progress (the visible upgrade)</h2>
+    <div class="callout success">
+      <div class="title">What the editor sees</div>
+      <p>A "frame X of Y" counter ticks up during each video, and matches now appear in the results panel in real time — no more waiting for the whole video to finish to know if a person was found.</p>
+    </div>
+    <p>The matches stream into the existing results panel as the scan progresses. The editor can already start eyeballing matches while later parts of the timeline are still being processed.</p>
+  </section>
+
+  <section>
+    <h2>Two safety nets</h2>
+
+    <div class="callout">
+      <div class="title">Snappy scans stay snappy</div>
+      <p>Spinning up worker processes takes a couple of seconds. For very short scans (under ~30 frames) that overhead would actually make things slower, so those small jobs keep using the existing single-process path. The user never notices a regression on quick clips.</p>
+    </div>
+
+    <div class="callout warn">
+      <div class="title">One-cycle feature flag</div>
+      <p>The whole parallel path is behind a switch that can be flipped off without redeploying code. It stays in place for one development cycle so a real wedding-length job can validate the change in production-like conditions. Once validated, the flag is removed.</p>
+    </div>
+
+    <div class="callout">
+      <div class="title">Reference loading rides along</div>
+      <p>The "first-time clustering after pointing at a big folder" pain has the same root cause and the same fix. It's included because the architectural change is shared — no extra design cost, immediate user-visible win on large reference folders.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Configuration surface</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Setting</th><th>Default</th><th>Why it exists</th></tr></thead>
+        <tbody>
+          <tr><td>Parallel scanning</td><td>On</td><td>Master switch — can be turned off to revert to the old behavior without a code change</td></tr>
+          <tr><td>Worker count</td><td>Auto (cores − 1, capped at 8)</td><td>Overridable for machines where the auto-detect is wrong</td></tr>
+          <tr><td>Small-scan threshold</td><td>30 frames</td><td>Below this, single-process is faster than spinning up workers</td></tr>
+          <tr><td>Reference-loading threshold</td><td>10 images</td><td>Same logic, applied to reference loading</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>How we know it works</h2>
+    <ul>
+      <li><strong>Equivalence test.</strong> The same small fixture video is scanned with the new parallel path and with the old single-process path. Results must be identical. This is the primary guarantee against accuracy regressions.</li>
+      <li><strong>Progress contract.</strong> The frame counter must reach the total, and the matches reported live must equal the final result set. No silent drops.</li>
+      <li><strong>Benchmark run.</strong> A one-shot script measures wall-clock time and frames per second on both paths, so the speedup is documented rather than assumed.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>What could go wrong</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Scenario</th><th>Behavior</th></tr></thead>
+        <tbody>
+          <tr><td>A single frame can't be processed</td><td>Logged and skipped. Same as today.</td></tr>
+          <tr><td>The worker pool fails to start</td><td>Warning logged, scan falls back to single-process. The product still works.</td></tr>
+          <tr><td>User cancels mid-scan</td><td>Workers shut down cleanly. Whatever matches were already streamed remain visible.</td></tr>
+          <tr><td>A future macOS regression makes parallelism unsafe</td><td>The feature flag can be flipped off, no redeploy needed.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    2026-05-28-parallel-face-scanning-design.md
+  </footer>
+
+</div>
+</body>
+</html>
