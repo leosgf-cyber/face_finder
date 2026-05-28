@@ -68,3 +68,50 @@ def test_scan_frames_small_scan_uses_fast_path(
     )
     assert "alice" in results
     assert len(results["alice"]) >= 1
+
+
+def test_progress_callback_contract(frames_dir, references_dir, matches_dir):
+    """Callback receives correct shape; frames_total constant; frames_done monotonic.
+
+    Union of new_matches across all callbacks must equal final results.
+    """
+    refs = load_references(str(references_dir), tolerance=0.6)
+
+    payloads = []
+
+    def cb(payload):
+        payloads.append(payload)
+
+    final_results = scan_frames(
+        str(frames_dir),
+        refs,
+        tolerance=0.6,
+        fps=1.0,
+        matches_dir=str(matches_dir),
+        progress_callback=cb,
+    )
+
+    assert len(payloads) >= 1, "callback should be invoked at least once"
+
+    totals = {p["frames_total"] for p in payloads}
+    assert len(totals) == 1, f"frames_total must be constant, got {totals}"
+
+    dones = [p["frames_done"] for p in payloads]
+    assert dones == sorted(dones), "frames_done must be monotonically increasing"
+    assert dones[-1] == payloads[0]["frames_total"], "final frames_done must equal total"
+
+    all_streamed = []
+    for p in payloads:
+        all_streamed.extend(p["new_matches"])
+
+    final_flat = []
+    for matches in final_results.values():
+        for m in matches:
+            final_flat.append(m)
+
+    def _key(m):
+        return (m["frame"], m["frame_number"], m["timestamp"])
+
+    streamed_keys = sorted(_key(m) for m in all_streamed)
+    final_keys = sorted(_key(m) for m in final_flat)
+    assert streamed_keys == final_keys
