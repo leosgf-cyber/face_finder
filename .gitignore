@@ -4,3 +4,9 @@ uploads/
 results/
 *.egg-info/
 models/*.dat
+
+# Test fixtures (generated locally, not committed)
+tests/fixtures/*.jpg
+tests/fixtures/*.png
+tests/fixtures/*.mp4
+!tests/fixtures/.gitkeep
