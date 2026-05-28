@@ -45,6 +45,69 @@ def _get_detector_and_encoder():
     return detector, shape_predictor, face_encoder
 
 
+# Worker-process globals — populated by _worker_init() exactly once per worker.
+# Process boundary ensures no contention with the main process or other workers.
+_WORKER_DETECTOR = None
+_WORKER_SHAPE_PREDICTOR = None
+_WORKER_FACE_ENCODER = None
+
+
+def _worker_init():
+    """Initializer for ProcessPoolExecutor workers.
+
+    Loads dlib models once per worker process into module globals so subsequent
+    frame processing reuses them. Each worker pays ~100MB resident model cost.
+    """
+    global _WORKER_DETECTOR, _WORKER_SHAPE_PREDICTOR, _WORKER_FACE_ENCODER
+    _ensure_models()
+    _WORKER_DETECTOR = dlib.get_frontal_face_detector()
+    _WORKER_SHAPE_PREDICTOR = dlib.shape_predictor(str(SHAPE_PREDICTOR))
+    _WORKER_FACE_ENCODER = dlib.face_recognition_model_v1(str(FACE_REC_MODEL))
+
+
+def _worker_process_frame(frame_index: int, frame_path: str):
+    """Read a frame, detect+encode faces, return (idx, path, [(encoding, jpeg_bytes)]).
+
+    Pure CPU-bound. Called from worker processes. The main process compares
+    encodings against the known references — workers don't know about references.
+    """
+    img = cv2.imread(frame_path)
+    if img is None:
+        return frame_index, frame_path, []
+
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    small_rgb, scale = _resize_for_detection(rgb)
+    detected = _WORKER_DETECTOR(small_rgb, 1)
+
+    faces = []
+    for face in detected:
+        if scale != 1.0:
+            orig_face = dlib.rectangle(
+                int(face.left() / scale),
+                int(face.top() / scale),
+                int(face.right() / scale),
+                int(face.bottom() / scale),
+            )
+            shape = _WORKER_SHAPE_PREDICTOR(rgb, orig_face)
+            encoding = np.array(
+                _WORKER_FACE_ENCODER.compute_face_descriptor(rgb, shape)
+            )
+            crop = _crop_face(img, orig_face, padding=0.5)
+        else:
+            shape = _WORKER_SHAPE_PREDICTOR(rgb, face)
+            encoding = np.array(
+                _WORKER_FACE_ENCODER.compute_face_descriptor(rgb, shape)
+            )
+            crop = _crop_face(img, face, padding=0.5)
+
+        ok, buf = cv2.imencode(".jpg", crop)
+        if not ok:
+            continue
+        faces.append((encoding, buf.tobytes()))
+
+    return frame_index, frame_path, faces
+
+
 def _resize_for_detection(rgb, max_width=1200):
     """Resize image for faster face detection, keeping aspect ratio.
 
