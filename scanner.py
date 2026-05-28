@@ -58,6 +58,27 @@ def _get_detector_and_encoder():
 # Tuned empirically — well-lit wedding footage typically sits at 120-180.
 _ENHANCE_LUMINANCE_THRESHOLD = 80
 
+# Per-person tolerance softening: a person with more reference shots (sunglasses,
+# side angles, low light) gets a slightly looser match threshold. Bonus scales
+# linearly with extra references beyond TOLERANCE_BONUS_FREE_REFS, capped at MAX.
+TOLERANCE_BONUS_FREE_REFS = 2
+TOLERANCE_BONUS_PER_REF = 0.025
+TOLERANCE_BONUS_MAX = 0.08
+
+
+def _compute_per_person_tolerance(references, base_tolerance):
+    """Return {name: effective_tolerance} based on how many references each person has.
+
+    People with 1-2 reference images use base_tolerance unchanged.
+    Each additional reference adds TOLERANCE_BONUS_PER_REF, capped at TOLERANCE_BONUS_MAX.
+    """
+    out = {}
+    for name, encodings in references.items():
+        extra = max(0, len(encodings) - TOLERANCE_BONUS_FREE_REFS)
+        bonus = min(extra * TOLERANCE_BONUS_PER_REF, TOLERANCE_BONUS_MAX)
+        out[name] = base_tolerance + bonus
+    return out
+
 
 def _enhance_for_detection(rgb, luminance_threshold=_ENHANCE_LUMINANCE_THRESHOLD):
     """Brighten dark images for face detection. Returns enhanced rgb or input.
@@ -422,6 +443,8 @@ def scan_frames(
             all_known_names.append(name)
     all_known_encodings = np.array(all_known_encodings)
 
+    per_person_tolerance = _compute_per_person_tolerance(references, tolerance)
+
     # Sequential dedup pass — cheap, runs on main.
     prev_frame = None
     skipped = 0
@@ -471,10 +494,10 @@ def scan_frames(
 
             distances = np.linalg.norm(all_known_encodings - encoding, axis=1)
             best_idx = int(np.argmin(distances))
-            if distances[best_idx] > tolerance:
+            matched_name = all_known_names[best_idx]
+            if distances[best_idx] > per_person_tolerance[matched_name]:
                 continue
 
-            matched_name = all_known_names[best_idx]
             frame_number = frame_index + 1
             timestamp_seconds = frame_number / fps
 
