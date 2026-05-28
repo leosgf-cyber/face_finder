@@ -444,15 +444,15 @@ def scan_frames(
                 for future in as_completed(futures):
                     frames_done += 1
                     frames_since_last_callback += 1
+                    new_matches = []
                     try:
                         frame_index, frame_file_path, faces = future.result()
                     except Exception as e:
                         print(f"  Aviso: worker falhou em frame: {e}")
-                        continue
-
-                    new_matches = _consume_face_result(
-                        frame_index, frame_file_path, faces
-                    )
+                    else:
+                        new_matches = _consume_face_result(
+                            frame_index, frame_file_path, faces
+                        )
 
                     should_emit = (
                         progress_callback is not None
