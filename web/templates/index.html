@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Face Finder</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Face Finder</h1>
+      <p>Encontre pessoas em vídeos a partir de fotos de referência</p>
+    </header>
+
+    <!-- CADASTRO DE PESSOAS -->
+    <div class="section">
+      <h2>1. Cadastrar Pessoas</h2>
+
+      <!-- Sensibilidade global -->
+      <div class="sensitivity-section">
+        <label class="sensitivity-label">Sensibilidade do agrupamento automático</label>
+        <div class="slider-row">
+          <span class="slider-label-left">Separar mais</span>
+          <input type="range" id="globalTolerance" min="0.35" max="0.70" step="0.05" value="0.55" oninput="updateSensitivityLabel(this.value)">
+          <span class="slider-label-right">Agrupar mais</span>
+          <span class="slider-value" id="sensitivityValue">0.55</span>
+        </div>
+        <div class="sensitivity-hint">Aplica-se ao escanear pastas e vídeos de referência</div>
+      </div>
+
+      <div class="tab-bar">
+        <button class="tab active" onclick="switchTab('people', 'manual', this)">Upload manual</button>
+        <button class="tab" onclick="switchTab('people', 'folder', this)">Apontar pasta</button>
+        <button class="tab" onclick="switchTab('people', 'video', this)">Vídeo de ref.</button>
+      </div>
+
+      <!-- Upload manual -->
+      <div id="people-manual" class="tab-content active">
+        <div class="form-row">
+          <div class="form-group" style="flex:1">
+            <label>Nome / Papel</label>
+            <input type="text" id="personName" placeholder="Ex: Pai da Noiva">
+          </div>
+          <label class="btn-upload" for="personPhotos">
+            Selecionar fotos
+          </label>
+          <input type="file" id="personPhotos" multiple accept="image/*">
+          <button class="btn btn-primary" id="addPersonBtn" onclick="addPerson()">Adicionar</button>
+        </div>
+        <div id="selectedFiles" style="font-size:12px; color:#888; margin-bottom:8px;"></div>
+      </div>
+
+      <!-- Apontar pasta -->
+      <div id="people-folder" class="tab-content">
+        <div class="form-row">
+          <label class="btn btn-primary" for="refFolderInput" style="cursor:pointer;">Procurar pasta</label>
+          <input type="file" id="refFolderInput" webkitdirectory directory multiple style="display:none;" onchange="scanFolderFiles(this)">
+          <span id="refFolderName" style="color:#888; font-size:13px;"></span>
+        </div>
+        <div id="scanProgress" style="font-size:13px; color:#888; margin-top:8px;"></div>
+      </div>
+
+      <!-- Vídeo de referência -->
+      <div id="people-video" class="tab-content">
+        <div class="form-row">
+          <label class="btn btn-primary" for="refVideoInput" style="cursor:pointer;">Selecionar vídeo</label>
+          <input type="file" id="refVideoInput" accept="video/*" style="display:none;" onchange="scanRefVideo(this)">
+          <span id="refVideoName" style="color:#888; font-size:13px;"></span>
+        </div>
+        <div class="settings-row" style="margin-top:12px;">
+          <div class="form-group">
+            <label>FPS</label>
+            <input type="number" id="refVideoFps" value="2" min="0.5" max="10" step="0.5">
+          </div>
+          <div class="form-group">
+            <label>Início (opcional)</label>
+            <input type="text" id="refVideoStart" placeholder="00:05">
+          </div>
+          <div class="form-group">
+            <label>Fim (opcional)</label>
+            <input type="text" id="refVideoEnd" placeholder="00:30">
+          </div>
+        </div>
+
+        <div id="refVideoProgress" style="font-size:13px; color:#888; margin-top:8px;"></div>
+      </div>
+
+      <!-- Clustering UI -->
+      <div id="clusteringSection" class="clustering-section" style="display:none;">
+        <h3 style="margin-bottom:12px; color:#fff;">Rostos encontrados — nomeie cada pessoa:</h3>
+        <div id="clusterGrid" class="cluster-grid"></div>
+        <button class="btn btn-primary" style="margin-top:12px;" onclick="confirmClusters()">Confirmar todos</button>
+      </div>
+
+      <div id="peopleGrid" class="people-grid"></div>
+      <div id="peopleEmpty" class="empty-state">Nenhuma pessoa cadastrada ainda.</div>
+    </div>
+
+    <!-- UPLOAD DE VÍDEOS -->
+    <div class="section">
+      <h2>2. Vídeos</h2>
+
+      <div class="tab-bar">
+        <button class="tab active" onclick="switchTab('videos', 'upload', this)">Upload</button>
+        <button class="tab" onclick="switchTab('videos', 'vfolder', this)">Apontar pasta</button>
+      </div>
+
+      <div id="videos-upload" class="tab-content active">
+        <div class="video-upload-area" id="videoArea" onclick="document.getElementById('videoFile').click()">
+          <p id="videoLabel">Clique para selecionar vídeos (pode selecionar vários)</p>
+          <input type="file" id="videoFile" multiple accept="video/*" onchange="uploadVideos(this)">
+        </div>
+      </div>
+
+      <div id="videos-vfolder" class="tab-content">
+        <div class="form-row">
+          <label class="btn btn-primary" for="videoFolderInput" style="cursor:pointer;">Procurar pasta</label>
+          <input type="file" id="videoFolderInput" webkitdirectory directory multiple style="display:none;" onchange="loadVideoFolderFiles(this)">
+          <span id="videoFolderName" style="color:#888; font-size:13px;"></span>
+        </div>
+        <div id="videoFolderProgress" style="font-size:13px; color:#888; margin-top:8px;"></div>
+      </div>
+
+      <div id="videosGrid" class="videos-grid"></div>
+      <div id="videosEmpty" class="empty-state">Nenhum vídeo carregado ainda.</div>
+    </div>
+
+    <!-- PROCESSAR -->
+    <div class="section">
+      <h2>3. Processar</h2>
+      <div class="settings-row">
+        <div class="form-group">
+          <label>FPS</label>
+          <input type="number" id="fpsInput" value="1" min="0.1" max="30" step="0.5">
+        </div>
+        <div class="form-group">
+          <label>Início (opcional)</label>
+          <input type="text" id="startInput" placeholder="01:33">
+        </div>
+        <div class="form-group">
+          <label>Fim (opcional)</label>
+          <input type="text" id="endInput" placeholder="22:21">
+        </div>
+        <div class="form-group">
+          <label>Tolerância</label>
+          <input type="number" id="toleranceInput" value="0.6" min="0.1" max="1.0" step="0.05">
+        </div>
+      </div>
+
+      <button class="btn btn-primary" id="processBtn" onclick="startProcessing()">
+        Processar Vídeos
+      </button>
+
+      <div class="progress-bar" id="progressBar">
+        <div class="progress-track">
+          <div class="progress-fill"></div>
+        </div>
+        <p class="progress-text" id="progressText">Iniciando...</p>
+      </div>
+    </div>
+
+    <!-- RESULTADOS -->
+    <div class="section results-section" id="resultsSection">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+        <h2 style="margin-bottom:0;">Resultados</h2>
+        <button class="btn btn-secondary" id="downloadBtn" onclick="downloadResults()">
+          Baixar JSON
+        </button>
+      </div>
+      <div id="resultsContainer"></div>
+    </div>
+    <div style="text-align:center; padding:20px 0; margin-top:10px;">
+      <button class="btn btn-secondary" onclick="cleanupTemp()">Limpar arquivos temporários</button>
+      <span id="cleanupResult" style="font-size:12px; color:#888; margin-left:8px;"></span>
+    </div>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
