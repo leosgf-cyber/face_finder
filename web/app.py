@@ -956,6 +956,19 @@ def _get_dir_size(path: Path) -> int:
     return total
 
 
+@app.route("/api/disk-usage", methods=["GET"])
+def disk_usage():
+    """Total size of the project's temp + working directories (results + uploads)."""
+    results_bytes = _get_dir_size(RESULTS_DIR) if RESULTS_DIR.exists() else 0
+    uploads_bytes = _get_dir_size(UPLOAD_DIR) if UPLOAD_DIR.exists() else 0
+    total = results_bytes + uploads_bytes
+    return jsonify({
+        "results_bytes": results_bytes,
+        "uploads_bytes": uploads_bytes,
+        "total_bytes": total,
+    })
+
+
 @app.route("/api/cleanup", methods=["POST"])
 def cleanup():
     """Delete temporary frames, scan, and refvid files from results/."""

@@ -25,8 +25,64 @@ function updateSensitivityLabel(value) {
 
 // Selection is handled by handlePhotoSelection (see below).
 
+// ========== DISK USAGE ==========
+
+var diskUsageState = {
+  limitGB: parseFloat(localStorage.getItem("diskLimitGB")) || 2,
+};
+
+function _formatSize(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + " KB";
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(0) + " MB";
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+}
+
+async function refreshDiskUsage() {
+  try {
+    var res = await fetch("/api/disk-usage");
+    var data = await res.json();
+    var limitBytes = diskUsageState.limitGB * 1024 * 1024 * 1024;
+    var pct = limitBytes > 0 ? Math.min(100, (data.total_bytes / limitBytes) * 100) : 0;
+
+    var fill = document.getElementById("diskUsageFill");
+    var text = document.getElementById("diskUsageText");
+    if (!fill || !text) return;
+
+    fill.style.width = pct + "%";
+    fill.classList.remove("warn", "danger");
+    if (pct >= 90) fill.classList.add("danger");
+    else if (pct >= 70) fill.classList.add("warn");
+
+    text.textContent = _formatSize(data.total_bytes) + " / " + diskUsageState.limitGB.toFixed(1) + " GB";
+    text.title = "results: " + _formatSize(data.results_bytes) + " · uploads: " + _formatSize(data.uploads_bytes);
+  } catch (e) {
+    /* silent */
+  }
+}
+
+function initDiskUsage() {
+  var input = document.getElementById("diskLimitInput");
+  if (input) {
+    input.value = diskUsageState.limitGB;
+    input.addEventListener("change", function () {
+      var v = parseFloat(this.value);
+      if (!isNaN(v) && v > 0) {
+        diskUsageState.limitGB = v;
+        localStorage.setItem("diskLimitGB", String(v));
+        refreshDiskUsage();
+      } else {
+        this.value = diskUsageState.limitGB;
+      }
+    });
+  }
+  refreshDiskUsage();
+  setInterval(refreshDiskUsage, 10000);
+}
+
 loadPeople();
 loadVideos();
+initDiskUsage();
 
 // ========== TABS ==========
 
@@ -1056,10 +1112,12 @@ function pollJob(jobId) {
       clearInterval(interval);
       showResults(job, jobId);
       resetProcessButton();
+      refreshDiskUsage();
     } else if (job.status === "error") {
       clearInterval(interval);
       alert("Erro: " + job.progress);
       resetProcessButton();
+      refreshDiskUsage();
     }
   }, 2000);
 }
@@ -1169,6 +1227,7 @@ async function cleanupTemp() {
     alert(data.error);
     return;
   }
-  document.getElementById("cleanupResult").textContent =
-    data.freed_mb + " MB liberado(s)";
+  var resEl = document.getElementById("cleanupResult");
+  if (resEl) resEl.textContent = data.freed_mb + " MB liberado(s)";
+  refreshDiskUsage();
 }
