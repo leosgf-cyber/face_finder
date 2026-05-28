@@ -144,26 +144,36 @@ async function scanFolderFiles(input) {
 
   var folderName = input.files[0].webkitRelativePath.split("/")[0];
 
-  var imageCount = 0;
+  var photoExts = ["jpg", "jpeg", "png", "bmp", "webp"];
+  var videoExts = ["mp4", "mov", "avi", "mkv", "webm", "m4v"];
+
+  var photos = [];
+  var videos = [];
   for (var i = 0; i < input.files.length; i++) {
     var ext = input.files[i].name.split(".").pop().toLowerCase();
-    if (["jpg", "jpeg", "png", "bmp", "webp"].indexOf(ext) !== -1) {
-      imageCount++;
-    }
+    if (photoExts.indexOf(ext) !== -1) photos.push(input.files[i]);
+    else if (videoExts.indexOf(ext) !== -1) videos.push(input.files[i]);
   }
 
-  if (imageCount === 0) {
-    alert("Nenhuma imagem encontrada na pasta.");
+  if (photos.length === 0 && videos.length === 0) {
+    alert("Nenhuma foto ou vídeo encontrado na pasta.");
     input.value = "";
     return;
   }
 
-  var msg = 'Pasta selecionada: "' + folderName + '"\n\n' +
-    imageCount + " imagem(ns) encontrada(s) em " + input.files.length + " arquivo(s) total.\n\n";
+  var parts = [];
+  if (photos.length > 0) parts.push(photos.length + " foto(s)");
+  if (videos.length > 0) parts.push(videos.length + " vídeo(s)");
+  var partsLabel = parts.join(" + ");
 
-  if (imageCount > 200) {
-    msg += "Essa pasta tem bastante conteudo! O escaneamento pode demorar um pouco.\n" +
-      "Dica: se possivel, selecione uma pasta menor com apenas as fotos de referencia.\n\n";
+  var msg = 'Pasta selecionada: "' + folderName + '"\n\n' +
+    partsLabel + " encontrado(s).\n\n";
+
+  if (photos.length > 200) {
+    msg += "Essa pasta tem bastante conteúdo! O escaneamento pode demorar um pouco.\n\n";
+  }
+  if (videos.length > 0) {
+    msg += "Os vídeos serão amostrados a 2 fps para extrair rostos.\n\n";
   }
 
   msg += "Deseja continuar com o escaneamento?";
@@ -174,22 +184,19 @@ async function scanFolderFiles(input) {
     return;
   }
 
-  document.getElementById("refFolderName").textContent = folderName + " (" + imageCount + " imagens)";
+  document.getElementById("refFolderName").textContent = folderName + " (" + partsLabel + ")";
 
   var formData = new FormData();
-  for (var i = 0; i < input.files.length; i++) {
-    var ext = input.files[i].name.split(".").pop().toLowerCase();
-    if (["jpg", "jpeg", "png", "bmp", "webp"].indexOf(ext) !== -1) {
-      formData.append("photos", input.files[i]);
-    }
-  }
+  for (var i = 0; i < photos.length; i++) formData.append("photos", photos[i]);
+  for (var i = 0; i < videos.length; i++) formData.append("videos", videos[i]);
   formData.append("cluster_tolerance", document.getElementById("globalTolerance").value);
 
+  var totalCount = photos.length + videos.length;
   document.getElementById("scanProgress").innerHTML =
     '<div class="scan-progress-bar">' +
     '<div class="scan-progress-track"><div class="scan-progress-fill" id="scanFill"></div></div>' +
     '<div class="scan-progress-info">' +
-    '<span id="scanStatusText">Enviando ' + imageCount + ' imagens...</span>' +
+    '<span id="scanStatusText">Enviando ' + totalCount + ' arquivo(s)...</span>' +
     '<span id="scanPercent">0%</span></div></div>';
 
   var xhr = new XMLHttpRequest();
@@ -247,8 +254,9 @@ function pollScan(scanId) {
 
       if (fill) fill.style.width = pct + "%";
       if (pctEl) pctEl.textContent = pct + "%";
+      var phaseLabel = (data.phase === "extracting") ? "extraindo frames" : "itens";
       if (text) text.textContent = data.processed + "/" + data.total +
-        " imagens | " + data.faces_found + " rosto(s) encontrado(s)";
+        " " + phaseLabel + " | " + data.faces_found + " rosto(s) encontrado(s)";
     }
 
     if (data.status === "done") {

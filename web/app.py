@@ -379,35 +379,78 @@ def _scan_ref_video_job(scan_id, video_path, fps, start, end, cluster_tolerance=
         scan_jobs[scan_id]["error"] = str(e)
 
 
+PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
+
+
+def _detect_faces_in_image(img_path, detector, shape_predictor, face_encoder, source_label):
+    """Detect every face in a single image, return list of {encoding, crop, source} dicts."""
+    img = cv2.imread(str(img_path))
+    if img is None:
+        return []
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    small_rgb, scale = _resize_for_detection(rgb)
+    detected = detector(small_rgb, 1)
+    out = []
+    for face_rect in detected:
+        if scale != 1.0:
+            orig_face = dlib.rectangle(
+                int(face_rect.left() / scale),
+                int(face_rect.top() / scale),
+                int(face_rect.right() / scale),
+                int(face_rect.bottom() / scale),
+            )
+            shape = shape_predictor(rgb, orig_face)
+            encoding = np.array(face_encoder.compute_face_descriptor(rgb, shape))
+            crop = _crop_face(img, orig_face, padding=0.4)
+        else:
+            shape = shape_predictor(rgb, face_rect)
+            encoding = np.array(face_encoder.compute_face_descriptor(rgb, shape))
+            crop = _crop_face(img, face_rect, padding=0.4)
+        out.append({"encoding": encoding, "crop": crop, "source": source_label})
+    return out
+
+
 @app.route("/api/scan-folder", methods=["POST"])
 def scan_folder():
-    files = request.files.getlist("photos")
-    if not files or not files[0].filename:
-        return jsonify({"error": "Nenhuma imagem recebida"}), 400
+    photo_files = [f for f in request.files.getlist("photos") if f.filename]
+    video_files = [f for f in request.files.getlist("videos") if f.filename]
+
+    if not photo_files and not video_files:
+        return jsonify({"error": "Nenhuma foto ou vídeo recebido"}), 400
 
     scan_id = uuid.uuid4().hex[:8]
     scan_upload_dir = RESULTS_DIR / f"scan_upload_{scan_id}"
     scan_upload_dir.mkdir(parents=True, exist_ok=True)
 
-    extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-    saved_files = []
-    for f in files:
-        if f.filename:
-            fname = Path(f.filename).name
-            ext = Path(fname).suffix.lower()
-            if ext in extensions:
-                dest = scan_upload_dir / fname
-                f.save(str(dest))
-                saved_files.append(dest)
+    saved_photos = []
+    for f in photo_files:
+        fname = Path(f.filename).name
+        if Path(fname).suffix.lower() in PHOTO_EXTENSIONS:
+            dest = scan_upload_dir / fname
+            f.save(str(dest))
+            saved_photos.append(dest)
 
-    if not saved_files:
-        return jsonify({"error": "Nenhuma imagem válida na pasta"}), 400
+    saved_videos = []
+    if video_files:
+        videos_temp_dir = RESULTS_DIR / f"scan_videos_{scan_id}"
+        videos_temp_dir.mkdir(parents=True, exist_ok=True)
+        for f in video_files:
+            fname = Path(f.filename).name
+            if Path(fname).suffix.lower() in VIDEO_EXTENSIONS:
+                dest = videos_temp_dir / fname
+                f.save(str(dest))
+                saved_videos.append(dest)
+
+    if not saved_photos and not saved_videos:
+        return jsonify({"error": "Nenhum arquivo válido na pasta"}), 400
 
     scan_jobs[scan_id] = {
         "status": "processing",
-        "total": len(saved_files),
+        "total": len(saved_photos),
         "processed": 0,
         "faces_found": 0,
+        "phase": "extracting" if saved_videos else "detecting",
         "result": None,
     }
 
@@ -415,45 +458,67 @@ def scan_folder():
 
     thread = threading.Thread(
         target=_scan_folder_job,
-        args=(scan_id, sorted(saved_files), str(scan_upload_dir), cluster_tolerance),
+        args=(
+            scan_id,
+            sorted(saved_photos),
+            sorted(saved_videos),
+            str(scan_upload_dir),
+            cluster_tolerance,
+        ),
         daemon=True,
     )
     thread.start()
 
-    return jsonify({"scan_id": scan_id, "total": len(saved_files)})
+    return jsonify({"scan_id": scan_id, "total": len(saved_photos) + len(saved_videos)})
 
 
-def _scan_folder_job(scan_id, saved_files, upload_dir, cluster_tolerance=0.55):
+def _scan_folder_job(scan_id, saved_photos, saved_videos, upload_dir, cluster_tolerance=0.55):
     try:
         detector, shape_predictor, face_encoder = _get_detector_and_encoder()
 
-        faces = []
-        for i, img_path in enumerate(saved_files):
-            scan_jobs[scan_id]["processed"] = i + 1
+        # Phase 1: extract frames from any videos, copy them into upload_dir with
+        # video-index prefix so frames from different videos don't collide on name.
+        frame_records = []  # [(frame_path_in_upload_dir, source_label)]
+        if saved_videos:
+            scan_jobs[scan_id]["phase"] = "extracting"
+            scan_jobs[scan_id]["total"] = len(saved_videos)
+            video_fps = 2.0
+            upload_dir_path = Path(upload_dir)
+            for vid_idx, video_path in enumerate(saved_videos):
+                scan_jobs[scan_id]["processed"] = vid_idx
+                frames_dir = RESULTS_DIR / f"scan_vidframes_{scan_id}_{vid_idx}"
+                extract_frames(str(video_path), str(frames_dir), video_fps, None, None)
+                for fp in sorted(frames_dir.glob("frame_*.jpg")):
+                    label = f"v{vid_idx}_{fp.name}"
+                    dest = upload_dir_path / label
+                    shutil.copy2(str(fp), str(dest))
+                    frame_records.append((dest, label))
+                shutil.rmtree(frames_dir, ignore_errors=True)
+            # Source video files no longer needed
+            shutil.rmtree(RESULTS_DIR / f"scan_videos_{scan_id}", ignore_errors=True)
 
-            img = cv2.imread(str(img_path))
-            if img is None:
-                continue
-            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            small_rgb, scale = _resize_for_detection(rgb)
-            detected = detector(small_rgb, 1)
-            for face_rect in detected:
-                if scale != 1.0:
-                    orig_face = dlib.rectangle(
-                        int(face_rect.left() / scale),
-                        int(face_rect.top() / scale),
-                        int(face_rect.right() / scale),
-                        int(face_rect.bottom() / scale),
-                    )
-                    shape = shape_predictor(rgb, orig_face)
-                    encoding = np.array(face_encoder.compute_face_descriptor(rgb, shape))
-                    crop = _crop_face(img, orig_face, padding=0.4)
-                else:
-                    shape = shape_predictor(rgb, face_rect)
-                    encoding = np.array(face_encoder.compute_face_descriptor(rgb, shape))
-                    crop = _crop_face(img, face_rect, padding=0.4)
-                faces.append({"encoding": encoding, "crop": crop, "source": img_path.name})
-                scan_jobs[scan_id]["faces_found"] = len(faces)
+        # Phase 2: detect faces in every photo and extracted frame
+        scan_jobs[scan_id]["phase"] = "detecting"
+        scan_jobs[scan_id]["total"] = len(saved_photos) + len(frame_records)
+        scan_jobs[scan_id]["processed"] = 0
+
+        faces = []
+        processed = 0
+        for img_path in saved_photos:
+            processed += 1
+            scan_jobs[scan_id]["processed"] = processed
+            faces.extend(_detect_faces_in_image(
+                img_path, detector, shape_predictor, face_encoder, img_path.name
+            ))
+            scan_jobs[scan_id]["faces_found"] = len(faces)
+
+        for frame_path, label in frame_records:
+            processed += 1
+            scan_jobs[scan_id]["processed"] = processed
+            faces.extend(_detect_faces_in_image(
+                frame_path, detector, shape_predictor, face_encoder, label
+            ))
+            scan_jobs[scan_id]["faces_found"] = len(faces)
 
         if not faces:
             scan_jobs[scan_id]["status"] = "error"
