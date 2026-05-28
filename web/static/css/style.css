@@ -770,8 +770,8 @@ input[type="file"] {
 /* ========== DISK USAGE BAR ========== */
 
 .disk-usage-bar {
-  margin-top: 14px;
-  padding: 10px 14px;
+  margin: 24px 0 8px 0;
+  padding: 12px 16px;
   background: #1a1a1a;
   border: 1px solid #2a2a2a;
   border-radius: 8px;
