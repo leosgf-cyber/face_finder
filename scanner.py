@@ -340,37 +340,6 @@ def _frames_are_similar(frame_a, frame_b, threshold=0.95):
     return score < (1 - threshold) * 255
 
 
-def _detect_and_encode(args):
-    frame_path, detector_data = args
-    detector, shape_predictor, face_encoder = detector_data
-
-    img = cv2.imread(str(frame_path))
-    if img is None:
-        return frame_path, img, []
-
-    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    small_rgb, scale = _resize_for_detection(rgb)
-    faces = detector(small_rgb, 1)
-    face_encodings = []
-    for face in faces:
-        if scale != 1.0:
-            orig_face = dlib.rectangle(
-                int(face.left() / scale),
-                int(face.top() / scale),
-                int(face.right() / scale),
-                int(face.bottom() / scale),
-            )
-            shape = shape_predictor(rgb, orig_face)
-            encoding = np.array(face_encoder.compute_face_descriptor(rgb, shape))
-            face_encodings.append((encoding, orig_face))
-        else:
-            shape = shape_predictor(rgb, face)
-            encoding = np.array(face_encoder.compute_face_descriptor(rgb, shape))
-            face_encodings.append((encoding, face))
-
-    return frame_path, img, face_encodings
-
-
 def scan_frames(
     frames_dir: str,
     references: dict,
