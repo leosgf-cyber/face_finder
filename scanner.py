@@ -22,6 +22,9 @@ FACE_REC_MODEL_URL = "https://github.com/davisking/dlib-models/raw/master/dlib_f
 # Below this many to-process frames, skip the pool — spawn cost would dominate.
 PARALLEL_THRESHOLD = 30
 
+# Below this many uncached reference images, skip the pool for ref loading.
+REFERENCE_PARALLEL_THRESHOLD = 10
+
 
 def _ensure_models():
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -114,6 +117,38 @@ def _worker_process_frame(frame_index: int, frame_path: str):
     return frame_index, frame_path, faces
 
 
+def _worker_process_reference(args):
+    """Process a single reference image. Worker-side helper.
+
+    args: (img_path_str, name)
+    returns: (name, encoding_or_None, img_path_str)
+    """
+    img_path_str, name = args
+    img = cv2.imread(img_path_str)
+    if img is None:
+        return name, None, img_path_str
+
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    small_rgb, scale = _resize_for_detection(rgb)
+    detected = _WORKER_DETECTOR(small_rgb, 1)
+    if not detected:
+        return name, None, img_path_str
+
+    face = detected[0]
+    if scale != 1.0:
+        orig_face = dlib.rectangle(
+            int(face.left() / scale),
+            int(face.top() / scale),
+            int(face.right() / scale),
+            int(face.bottom() / scale),
+        )
+        shape = _WORKER_SHAPE_PREDICTOR(rgb, orig_face)
+    else:
+        shape = _WORKER_SHAPE_PREDICTOR(rgb, face)
+    encoding = np.array(_WORKER_FACE_ENCODER.compute_face_descriptor(rgb, shape))
+    return name, encoding, img_path_str
+
+
 def _resize_for_detection(rgb, max_width=1200):
     """Resize image for faster face detection, keeping aspect ratio.
 
@@ -188,46 +223,79 @@ def load_references(references_dir: str, tolerance: float = 0.6) -> dict:
 
     extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
     cache_path = ref_dir / ".encodings_cache.pkl"
-
-    # Collect all reference files to check cache validity
     ref_files = _get_ref_files(ref_dir, extensions)
 
     if _cache_is_valid(cache_path, ref_files):
         print("Carregando referências do cache...")
         with open(cache_path, "rb") as f:
             people = pickle.load(f)
-
         print(f"Referências carregadas (cache): {len(people)} pessoa(s)")
         for name, encs in people.items():
             print(f"  - {name}: {len(encs)} foto(s)")
         return people
 
-    detector, shape_predictor, face_encoder = _get_detector_and_encoder()
-
-    people = {}
-
     subdirs = [d for d in ref_dir.iterdir() if d.is_dir()]
     uses_folders = len(subdirs) > 0
 
+    tasks = []
     if uses_folders:
         for person_dir in sorted(subdirs):
             name = person_dir.name
             for img_path in sorted(person_dir.iterdir()):
-                if img_path.suffix.lower() not in extensions:
-                    continue
-                _load_face(img_path, name, people, detector, shape_predictor, face_encoder)
+                if img_path.suffix.lower() in extensions:
+                    tasks.append((str(img_path), name))
     else:
         for img_path in sorted(ref_dir.iterdir()):
-            if img_path.suffix.lower() not in extensions:
-                continue
-            name = img_path.stem.rsplit("_", 1)[0]
-            _load_face(img_path, name, people, detector, shape_predictor, face_encoder)
+            if img_path.suffix.lower() in extensions:
+                name = img_path.stem.rsplit("_", 1)[0]
+                tasks.append((str(img_path), name))
+
+    parallel_enabled = os.environ.get("FACE_FINDER_PARALLEL", "1") != "0"
+    use_pool = parallel_enabled and len(tasks) >= REFERENCE_PARALLEL_THRESHOLD
+
+    people = {}
+
+    if use_pool:
+        max_workers = int(
+            os.environ.get(
+                "FACE_FINDER_WORKERS", min((os.cpu_count() or 2) - 1, 8)
+            )
+        )
+        max_workers = max(1, max_workers)
+
+        try:
+            ctx = multiprocessing.get_context("spawn")
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                mp_context=ctx,
+                initializer=_worker_init,
+            ) as executor:
+                ordered_results = list(executor.map(_worker_process_reference, tasks))
+        except Exception as e:
+            print(f"  Aviso: pool falhou ({e}); caindo pra single-process")
+            use_pool = False
+        else:
+            for name, encoding, img_path_str in ordered_results:
+                if encoding is None:
+                    print(
+                        f"  Aviso: nenhum rosto encontrado em "
+                        f"'{Path(img_path_str).name}', pulando."
+                    )
+                    continue
+                people.setdefault(name, []).append(encoding)
+
+    if not use_pool:
+        detector, shape_predictor, face_encoder = _get_detector_and_encoder()
+        for img_path_str, name in tasks:
+            img_path = Path(img_path_str)
+            _load_face(
+                img_path, name, people, detector, shape_predictor, face_encoder
+            )
 
     if not people:
         print("Erro: nenhum rosto de referência foi carregado.")
         sys.exit(1)
 
-    # Save cache
     try:
         with open(cache_path, "wb") as f:
             pickle.dump(people, f)
