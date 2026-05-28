@@ -54,6 +54,53 @@ def _get_detector_and_encoder():
     return detector, shape_predictor, face_encoder
 
 
+# Low-light detection enhancement: skip when mean L (LAB) ≥ this threshold.
+# Tuned empirically — well-lit wedding footage typically sits at 120-180.
+_ENHANCE_LUMINANCE_THRESHOLD = 80
+
+
+def _enhance_for_detection(rgb, luminance_threshold=_ENHANCE_LUMINANCE_THRESHOLD):
+    """Brighten dark images for face detection. Returns enhanced rgb or input.
+
+    Adaptive: when the image is already well-lit (mean L >= threshold), the
+    input is returned unchanged with no extra cost. Otherwise applies CLAHE on
+    the L channel + gamma 1.5 to recover faces in shadow.
+
+    The enhanced image is intended for DETECTION ONLY. Encoding should run
+    against the original rgb so embeddings stay comparable with reference
+    encodings made under different lighting.
+    """
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
+    l_channel = lab[:, :, 0]
+    if float(l_channel.mean()) >= luminance_threshold:
+        return rgb
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    lab[:, :, 0] = clahe.apply(l_channel)
+    enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+    gamma = 1.5
+    table = np.array(
+        [((i / 255.0) ** (1.0 / gamma)) * 255 for i in range(256)]
+    ).astype(np.uint8)
+    return cv2.LUT(enhanced, table)
+
+
+def _detect_faces(rgb, detector):
+    """Run face detection with low-light enhancement + brightening fallback.
+
+    1. First attempt: detect on the (adaptively) enhanced image.
+    2. If zero faces found, retry on a brightened copy of the original.
+
+    Returns the detector's rectangles (same type as `detector(rgb, 1)`),
+    in the coordinate space of the input `rgb`.
+    """
+    enhanced = _enhance_for_detection(rgb)
+    detected = detector(enhanced, 1)
+    if len(detected) > 0:
+        return detected
+    bright = cv2.convertScaleAbs(rgb, alpha=1.5, beta=30)
+    return detector(bright, 1)
+
+
 # Worker-process globals — populated by _worker_init() exactly once per worker.
 # Process boundary ensures no contention with the main process or other workers.
 _WORKER_DETECTOR = None
@@ -86,7 +133,7 @@ def _worker_process_frame(frame_index: int, frame_path: str):
 
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     small_rgb, scale = _resize_for_detection(rgb)
-    detected = _WORKER_DETECTOR(small_rgb, 1)
+    detected = _detect_faces(small_rgb, _WORKER_DETECTOR)
 
     faces = []
     for face in detected:
@@ -130,7 +177,7 @@ def _worker_process_reference(args):
 
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     small_rgb, scale = _resize_for_detection(rgb)
-    detected = _WORKER_DETECTOR(small_rgb, 1)
+    detected = _detect_faces(small_rgb, _WORKER_DETECTOR)
     if not detected:
         return name, None, img_path_str
 
@@ -166,7 +213,7 @@ def _resize_for_detection(rgb, max_width=1200):
 
 def _encode_faces(img_rgb, detector, shape_predictor, face_encoder):
     small_rgb, scale = _resize_for_detection(img_rgb)
-    faces = detector(small_rgb, 1)
+    faces = _detect_faces(small_rgb, detector)
     encodings = []
     for face in faces:
         if scale != 1.0:
@@ -528,7 +575,7 @@ def scan_frames(
 
             rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             small_rgb, scale = _resize_for_detection(rgb)
-            detected = detector(small_rgb, 1)
+            detected = _detect_faces(small_rgb, detector)
             face_data_list = []
             for face in detected:
                 if scale != 1.0:

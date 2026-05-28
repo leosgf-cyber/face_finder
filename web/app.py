@@ -12,7 +12,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from extractor import extract_frames
-from scanner import load_references, scan_frames, _get_detector_and_encoder, _crop_face, _resize_for_detection
+from scanner import load_references, scan_frames, _get_detector_and_encoder, _crop_face, _resize_for_detection, _detect_faces
 
 import cv2
 import dlib
@@ -170,7 +170,7 @@ def _match_clusters_to_existing(clusters):
                     continue
                 rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 small_rgb, scale = _resize_for_detection(rgb)
-                detected = detector(small_rgb, 1)
+                detected = _detect_faces(small_rgb, detector)
                 for face_rect in detected:
                     if scale != 1.0:
                         orig_face = dlib.rectangle(
@@ -312,7 +312,7 @@ def _scan_ref_video_job(scan_id, video_path, fps, start, end, cluster_tolerance=
                 continue
             rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             small_rgb, scale = _resize_for_detection(rgb)
-            detected = detector(small_rgb, 1)
+            detected = _detect_faces(small_rgb, detector)
             for face_rect in detected:
                 if scale != 1.0:
                     orig_face = dlib.rectangle(
@@ -390,7 +390,7 @@ def _detect_faces_in_image(img_path, detector, shape_predictor, face_encoder, so
         return []
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     small_rgb, scale = _resize_for_detection(rgb)
-    detected = detector(small_rgb, 1)
+    detected = _detect_faces(small_rgb, detector)
     out = []
     for face_rect in detected:
         if scale != 1.0:
