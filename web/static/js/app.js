@@ -790,6 +790,10 @@ async function startProcessing() {
 }
 
 function pollJob(jobId) {
+  window.__lastSeenMatchIndex = 0;
+  const liveBox = document.getElementById("liveMatches");
+  if (liveBox) liveBox.innerHTML = "";
+
   const interval = setInterval(async function () {
     const res = await fetch("/api/jobs/" + jobId);
     const job = await res.json();
@@ -799,6 +803,35 @@ function pollJob(jobId) {
       progressMsg += " | " + job.partial_matches + " match(es) ate agora";
     }
     document.getElementById("progressText").textContent = progressMsg;
+
+    // Frame counter (per-video)
+    const frameCounter = document.getElementById("frameCounter");
+    if (frameCounter) {
+      if (job.frames_total && job.status === "processing") {
+        frameCounter.style.display = "block";
+        frameCounter.textContent = "Frame " + job.frames_done + " / " + job.frames_total;
+      } else {
+        frameCounter.style.display = "none";
+      }
+    }
+
+    // Incremental live matches
+    const liveMatchBox = document.getElementById("liveMatches");
+    if (liveMatchBox && Array.isArray(job.live_matches)) {
+      if (typeof window.__lastSeenMatchIndex === "undefined") {
+        window.__lastSeenMatchIndex = 0;
+      }
+      const slice = job.live_matches.slice(window.__lastSeenMatchIndex);
+      for (const m of slice) {
+        const row = document.createElement("div");
+        row.className = "live-match-row";
+        row.style.cssText = "padding: 4px 0; font-size: 13px; color: #ccc;";
+        row.textContent =
+          (m.video || "") + " · " + (m.timestamp || "") + " · " + (m.frame || "");
+        liveMatchBox.appendChild(row);
+      }
+      window.__lastSeenMatchIndex = job.live_matches.length;
+    }
 
     if (job.status === "done") {
       clearInterval(interval);
