@@ -1,7 +1,10 @@
 import json
+import os
 import sys
 import urllib.request
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+import multiprocessing
 
 import cv2
 import dlib
@@ -15,6 +18,9 @@ FACE_REC_MODEL = MODELS_DIR / "dlib_face_recognition_resnet_model_v1.dat"
 
 SHAPE_PREDICTOR_URL = "https://github.com/davisking/dlib-models/raw/master/shape_predictor_68_face_landmarks.dat.bz2"
 FACE_REC_MODEL_URL = "https://github.com/davisking/dlib-models/raw/master/dlib_face_recognition_resnet_model_v1.dat.bz2"
+
+# Below this many to-process frames, skip the pool — spawn cost would dominate.
+PARALLEL_THRESHOLD = 30
 
 
 def _ensure_models():
@@ -303,7 +309,17 @@ def scan_frames(
     tolerance: float = 0.6,
     fps: float = 1.0,
     matches_dir: str | None = None,
+    progress_callback=None,
 ) -> dict:
+    """Scan a directory of extracted frames for known faces.
+
+    Returns: {name: [match_entry, ...]} keyed by reference person name.
+
+    progress_callback: optional callable invoked from the main thread with
+        {"frames_done": int, "frames_total": int, "new_matches": [entry, ...]}
+        whenever a frame completes that produced matches, plus every 10 frames
+        otherwise, plus on the final frame.
+    """
     frames_path = Path(frames_dir)
     frame_files = sorted(frames_path.glob("frame_*.jpg"))
 
@@ -314,17 +330,15 @@ def scan_frames(
     if matches_dir:
         Path(matches_dir).mkdir(parents=True, exist_ok=True)
 
-    detector, shape_predictor, face_encoder = _get_detector_and_encoder()
-
     all_known_encodings = []
     all_known_names = []
     for name, encodings in references.items():
         for enc in encodings:
             all_known_encodings.append(enc)
             all_known_names.append(name)
-
     all_known_encodings = np.array(all_known_encodings)
 
+    # Sequential dedup pass — cheap, runs on main.
     prev_frame = None
     skipped = 0
     to_process = []
@@ -339,68 +353,191 @@ def scan_frames(
         prev_frame = img
         to_process.append((i, frame_file))
 
-    print(f"\nVarrendo {len(to_process)} frames ({skipped} similares pulados de {len(frame_files)} total)...")
+    print(
+        f"\nVarrendo {len(to_process)} frames "
+        f"({skipped} similares pulados de {len(frame_files)} total)..."
+    )
 
-    results = {}
-    for name in references:
-        results[name] = []
+    results = {name: [] for name in references}
+    match_counter = [0]  # mutable so the helper can update it
 
-    match_counter = 0
+    def _consume_face_result(frame_index, frame_file_path, faces, img_for_crop=None):
+        """Compare each detected face against references, record matches.
 
-    for idx, (i, frame_file) in enumerate(to_process):
-        if (idx + 1) % 50 == 0 or idx == 0:
-            print(f"  Processando {idx + 1}/{len(to_process)}...")
-
-        img = cv2.imread(str(frame_file))
-        if img is None:
-            continue
-
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        small_rgb, scale = _resize_for_detection(rgb)
-        faces = detector(small_rgb, 1)
-        face_encodings = []
-        for face in faces:
-            if scale != 1.0:
-                orig_face = dlib.rectangle(
-                    int(face.left() / scale),
-                    int(face.top() / scale),
-                    int(face.right() / scale),
-                    int(face.bottom() / scale),
-                )
-                shape = shape_predictor(rgb, orig_face)
-                encoding = np.array(face_encoder.compute_face_descriptor(rgb, shape))
-                face_encodings.append((encoding, orig_face))
+        Returns the list of match entries discovered in this frame (for the callback).
+        img_for_crop is provided only by the single-process fast path; the parallel
+        path passes JPEG bytes inline so we never need to re-read the file.
+        """
+        new_matches = []
+        for face_data in faces:
+            if isinstance(face_data, tuple) and len(face_data) == 2:
+                first, second = face_data
+                if isinstance(second, (bytes, bytearray)):
+                    # Parallel path: (encoding_ndarray, jpeg_bytes)
+                    encoding = first
+                    crop_bytes = bytes(second)
+                    face_rect_for_seq = None
+                else:
+                    # Single-process path: (encoding, face_rect)
+                    encoding = first
+                    face_rect_for_seq = second
+                    crop_bytes = None
             else:
-                shape = shape_predictor(rgb, face)
-                encoding = np.array(face_encoder.compute_face_descriptor(rgb, shape))
-                face_encodings.append((encoding, face))
+                continue
 
-        for face_enc, face_rect in face_encodings:
-            distances = np.linalg.norm(all_known_encodings - face_enc, axis=1)
-            best_idx = np.argmin(distances)
+            distances = np.linalg.norm(all_known_encodings - encoding, axis=1)
+            best_idx = int(np.argmin(distances))
+            if distances[best_idx] > tolerance:
+                continue
 
-            if distances[best_idx] <= tolerance:
-                matched_name = all_known_names[best_idx]
-                frame_number = i + 1
-                timestamp_seconds = frame_number / fps
-                timestamp = format_timestamp(timestamp_seconds)
+            matched_name = all_known_names[best_idx]
+            frame_number = frame_index + 1
+            timestamp_seconds = frame_number / fps
 
-                entry = {
-                    "frame": frame_file.name,
-                    "frame_number": frame_number,
-                    "timestamp": timestamp,
-                    "confidence": round(1 - float(distances[best_idx]), 3),
+            entry = {
+                "frame": Path(frame_file_path).name,
+                "frame_number": frame_number,
+                "timestamp": format_timestamp(timestamp_seconds),
+                "confidence": round(1 - float(distances[best_idx]), 3),
+            }
+
+            if matches_dir:
+                match_filename = f"match_{match_counter[0]:04d}.jpg"
+                match_path = Path(matches_dir) / match_filename
+                if crop_bytes is not None:
+                    match_path.write_bytes(crop_bytes)
+                else:
+                    crop = _crop_face(img_for_crop, face_rect_for_seq, padding=0.5)
+                    cv2.imwrite(str(match_path), crop)
+                entry["match_image"] = match_filename
+                match_counter[0] += 1
+
+            if entry not in results[matched_name]:
+                results[matched_name].append(entry)
+                new_matches.append(entry)
+        return new_matches
+
+    parallel_enabled = os.environ.get("FACE_FINDER_PARALLEL", "1") != "0"
+    use_pool = parallel_enabled and len(to_process) >= PARALLEL_THRESHOLD
+
+    if use_pool:
+        max_workers = int(
+            os.environ.get(
+                "FACE_FINDER_WORKERS", min((os.cpu_count() or 2) - 1, 8)
+            )
+        )
+        max_workers = max(1, max_workers)
+
+        try:
+            ctx = multiprocessing.get_context("spawn")
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                mp_context=ctx,
+                initializer=_worker_init,
+            ) as executor:
+                futures = {
+                    executor.submit(_worker_process_frame, i, str(frame_file)): i
+                    for i, frame_file in to_process
                 }
+                frames_done = 0
+                frames_since_last_callback = 0
+                for future in as_completed(futures):
+                    frames_done += 1
+                    frames_since_last_callback += 1
+                    try:
+                        frame_index, frame_file_path, faces = future.result()
+                    except Exception as e:
+                        print(f"  Aviso: worker falhou em frame: {e}")
+                        continue
 
-                if matches_dir:
-                    match_img = _crop_face(img, face_rect, padding=0.5)
-                    match_filename = f"match_{match_counter:04d}.jpg"
-                    cv2.imwrite(str(Path(matches_dir) / match_filename), match_img)
-                    entry["match_image"] = match_filename
-                    match_counter += 1
+                    new_matches = _consume_face_result(
+                        frame_index, frame_file_path, faces
+                    )
 
-                if entry not in results[matched_name]:
-                    results[matched_name].append(entry)
+                    should_emit = (
+                        progress_callback is not None
+                        and (
+                            bool(new_matches)
+                            or frames_since_last_callback >= 10
+                            or frames_done == len(to_process)
+                        )
+                    )
+                    if should_emit:
+                        progress_callback(
+                            {
+                                "frames_done": frames_done,
+                                "frames_total": len(to_process),
+                                "new_matches": new_matches,
+                            }
+                        )
+                        frames_since_last_callback = 0
+        except Exception as e:
+            print(f"  Aviso: pool falhou ({e}); caindo pra single-process")
+            use_pool = False
+
+    if not use_pool:
+        detector, shape_predictor, face_encoder = _get_detector_and_encoder()
+        frames_done = 0
+        frames_since_last_callback = 0
+        for idx, (i, frame_file) in enumerate(to_process):
+            frames_done += 1
+            frames_since_last_callback += 1
+            if (idx + 1) % 50 == 0 or idx == 0:
+                print(f"  Processando {idx + 1}/{len(to_process)}...")
+
+            img = cv2.imread(str(frame_file))
+            if img is None:
+                continue
+
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            small_rgb, scale = _resize_for_detection(rgb)
+            detected = detector(small_rgb, 1)
+            face_data_list = []
+            for face in detected:
+                if scale != 1.0:
+                    orig_face = dlib.rectangle(
+                        int(face.left() / scale),
+                        int(face.top() / scale),
+                        int(face.right() / scale),
+                        int(face.bottom() / scale),
+                    )
+                    shape = shape_predictor(rgb, orig_face)
+                    encoding = np.array(
+                        face_encoder.compute_face_descriptor(rgb, shape)
+                    )
+                    face_data_list.append((encoding, orig_face))
+                else:
+                    shape = shape_predictor(rgb, face)
+                    encoding = np.array(
+                        face_encoder.compute_face_descriptor(rgb, shape)
+                    )
+                    face_data_list.append((encoding, face))
+
+            new_matches = _consume_face_result(
+                i, str(frame_file), face_data_list, img_for_crop=img
+            )
+
+            should_emit = (
+                progress_callback is not None
+                and (
+                    bool(new_matches)
+                    or frames_since_last_callback >= 10
+                    or frames_done == len(to_process)
+                )
+            )
+            if should_emit:
+                progress_callback(
+                    {
+                        "frames_done": frames_done,
+                        "frames_total": len(to_process),
+                        "new_matches": new_matches,
+                    }
+                )
+                frames_since_last_callback = 0
+
+    # Determinism: sort each name's matches by frame_number.
+    for name in list(results.keys()):
+        results[name].sort(key=lambda m: m["frame_number"])
 
     results = {name: matches for name, matches in results.items() if matches}
     return results
