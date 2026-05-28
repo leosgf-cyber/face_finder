@@ -12,7 +12,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from extractor import extract_frames
-from scanner import load_references, scan_frames, _get_detector_and_encoder, _crop_face, _resize_for_detection, _detect_faces
+from scanner import load_references, scan_frames, scan_photo, _get_detector_and_encoder, _crop_face, _resize_for_detection, _detect_faces
 
 import cv2
 import dlib
@@ -107,35 +107,61 @@ def delete_person(name):
     return jsonify({"error": "Pessoa não encontrada"}), 404
 
 
+SCANNABLE_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
+SCANNABLE_PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+SCANNABLE_EXTS = SCANNABLE_VIDEO_EXTS | SCANNABLE_PHOTO_EXTS
+
+
+def _media_type(filename):
+    ext = Path(filename).suffix.lower()
+    if ext in SCANNABLE_PHOTO_EXTS:
+        return "photo"
+    if ext in SCANNABLE_VIDEO_EXTS:
+        return "video"
+    return None
+
+
 @app.route("/api/videos", methods=["GET"])
 def list_videos():
-    vids = []
+    items = []
     if VIDEOS_DIR.exists():
         for f in sorted(VIDEOS_DIR.iterdir()):
-            if f.is_file() and f.suffix.lower() in {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}:
-                size_mb = round(f.stat().st_size / (1024 * 1024), 1)
-                vids.append({"filename": f.name, "original_name": f.stem, "size_mb": size_mb})
-    return jsonify(vids)
+            if not f.is_file():
+                continue
+            mtype = _media_type(f.name)
+            if mtype is None:
+                continue
+            size_mb = round(f.stat().st_size / (1024 * 1024), 1)
+            items.append({
+                "filename": f.name,
+                "original_name": f.stem,
+                "size_mb": size_mb,
+                "type": mtype,
+            })
+    return jsonify(items)
 
 
 @app.route("/api/videos", methods=["POST"])
 def upload_videos():
     files = request.files.getlist("videos")
     if not files or not files[0].filename:
-        return jsonify({"error": "Envie pelo menos um vídeo"}), 400
+        return jsonify({"error": "Envie pelo menos um arquivo"}), 400
 
     saved = []
     for v in files:
-        if v.filename:
-            original = Path(v.filename).name
+        if not v.filename:
+            continue
+        if _media_type(v.filename) is None:
+            continue
+        original = Path(v.filename).name
+        dest = VIDEOS_DIR / original
+        if dest.exists():
+            stem = Path(v.filename).stem
+            ext = Path(v.filename).suffix
+            original = f"{stem}_{uuid.uuid4().hex[:4]}{ext}"
             dest = VIDEOS_DIR / original
-            if dest.exists():
-                stem = Path(v.filename).stem
-                ext = Path(v.filename).suffix
-                original = f"{stem}_{uuid.uuid4().hex[:4]}{ext}"
-                dest = VIDEOS_DIR / original
-            v.save(str(dest))
-            saved.append(original)
+        v.save(str(dest))
+        saved.append(original)
 
     return jsonify({"uploaded": saved})
 
@@ -146,7 +172,7 @@ def delete_video(filename):
     if video_path.exists():
         video_path.unlink()
         return jsonify({"deleted": filename})
-    return jsonify({"error": "Vídeo não encontrado"}), 404
+    return jsonify({"error": "Arquivo não encontrado"}), 404
 
 
 pending_clusters = {}
@@ -725,22 +751,23 @@ def confirm_people():
 def load_videos_folder():
     files = request.files.getlist("videos")
     if not files or not files[0].filename:
-        return jsonify({"error": "Nenhum vídeo recebido"}), 400
+        return jsonify({"error": "Nenhum arquivo recebido"}), 400
 
-    video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
     loaded = []
 
     for v in files:
-        if v.filename:
-            fname = Path(v.filename).name
-            if Path(fname).suffix.lower() in video_exts:
-                dest = VIDEOS_DIR / fname
-                if not dest.exists():
-                    v.save(str(dest))
-                loaded.append(fname)
+        if not v.filename:
+            continue
+        fname = Path(v.filename).name
+        if _media_type(fname) is None:
+            continue
+        dest = VIDEOS_DIR / fname
+        if not dest.exists():
+            v.save(str(dest))
+        loaded.append(fname)
 
     if not loaded:
-        return jsonify({"error": "Nenhum vídeo encontrado na pasta"}), 400
+        return jsonify({"error": "Nenhum vídeo ou foto encontrado na pasta"}), 400
 
     return jsonify({"loaded": loaded, "count": len(loaded)})
 
@@ -803,41 +830,61 @@ def _process_job(job_id, video_paths, video_names, fps, tolerance, start, end):
 
         all_results = {}
 
-        for idx, (video_path, video_name) in enumerate(zip(video_paths, video_names)):
-            jobs[job_id]["progress"] = (
-                f"Extraindo frames: {video_name} ({idx + 1}/{len(video_paths)})..."
-            )
-            frames_dir = str(RESULTS_DIR / f"frames_{job_id}_{idx}")
-            extract_frames(video_path, frames_dir, fps, start, end)
+        # video_paths is a misnomer now — may contain photos too. Branch per item.
+        for idx, (item_path, item_name) in enumerate(zip(video_paths, video_names)):
+            is_photo = _media_type(item_name) == "photo"
+            type_label = "Foto" if is_photo else "Vídeo"
 
-            jobs[job_id]["progress"] = (
-                f"Varrendo: {video_name} ({idx + 1}/{len(video_paths)})..."
-            )
-            # Reset per-video frame counter; live_matches accumulates across videos.
+            # Reset per-item frame counter; live_matches accumulates across items.
             jobs[job_id]["frames_done"] = 0
             jobs[job_id]["frames_total"] = 0
 
-            def _on_progress(payload, _video_name=video_name):
+            def _on_progress(payload, _item_name=item_name):
                 jobs[job_id]["frames_done"] = payload["frames_done"]
                 jobs[job_id]["frames_total"] = payload["frames_total"]
                 for m in payload["new_matches"]:
                     m_with_video = dict(m)
-                    m_with_video["video"] = _video_name
+                    m_with_video["video"] = _item_name
                     jobs[job_id]["live_matches"].append(m_with_video)
                 jobs[job_id]["partial_matches"] = len(jobs[job_id]["live_matches"])
 
-            results = scan_frames(
-                frames_dir,
-                refs,
-                tolerance,
-                fps,
-                matches_dir,
-                progress_callback=_on_progress,
-            )
+            if is_photo:
+                jobs[job_id]["progress"] = (
+                    f"Varrendo foto: {item_name} ({idx + 1}/{len(video_paths)})..."
+                )
+                results = scan_photo(
+                    item_path,
+                    refs,
+                    tolerance,
+                    matches_dir,
+                    progress_callback=_on_progress,
+                )
+            else:
+                jobs[job_id]["progress"] = (
+                    f"Extraindo frames: {item_name} ({idx + 1}/{len(video_paths)})..."
+                )
+                frames_dir = str(RESULTS_DIR / f"frames_{job_id}_{idx}")
+                extract_frames(item_path, frames_dir, fps, start, end)
+
+                jobs[job_id]["progress"] = (
+                    f"Varrendo: {item_name} ({idx + 1}/{len(video_paths)})..."
+                )
+                results = scan_frames(
+                    frames_dir,
+                    refs,
+                    tolerance,
+                    fps,
+                    matches_dir,
+                    progress_callback=_on_progress,
+                )
+                try:
+                    shutil.rmtree(frames_dir)
+                except Exception:
+                    pass
 
             for name, matches in results.items():
                 for m in matches:
-                    m["video"] = video_name
+                    m["video"] = item_name
                 if name not in all_results:
                     all_results[name] = []
                 all_results[name].extend(matches)
@@ -846,14 +893,9 @@ def _process_job(job_id, video_paths, video_names, fps, tolerance, start, end):
             people_found = len(all_results)
             jobs[job_id]["partial_matches"] = total_matches
             jobs[job_id]["progress"] = (
-                f"Video {idx + 1}/{len(video_paths)} concluido | "
+                f"{type_label} {idx + 1}/{len(video_paths)} concluído | "
                 f"{people_found} pessoa(s), {total_matches} match(es)"
             )
-
-            try:
-                shutil.rmtree(frames_dir)
-            except Exception:
-                pass
 
         result_path = RESULTS_DIR / f"{job_id}.json"
         with open(result_path, "w", encoding="utf-8") as f:

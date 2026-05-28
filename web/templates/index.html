@@ -112,9 +112,9 @@
       <div id="peopleEmpty" class="empty-state">Nenhuma pessoa cadastrada ainda.</div>
     </div>
 
-    <!-- UPLOAD DE VÍDEOS -->
+    <!-- UPLOAD DE MÍDIA PRA ESCANEAR -->
     <div class="section">
-      <h2>2. Vídeos</h2>
+      <h2>2. Vídeos e Fotos</h2>
 
       <div class="tab-bar">
         <button class="tab active" onclick="switchTab('videos', 'upload', this)">Upload</button>
@@ -123,8 +123,8 @@
 
       <div id="videos-upload" class="tab-content active">
         <div class="video-upload-area" id="videoArea" onclick="document.getElementById('videoFile').click()">
-          <p id="videoLabel">Clique para selecionar vídeos (pode selecionar vários)</p>
-          <input type="file" id="videoFile" multiple accept="video/*" onchange="uploadVideos(this)">
+          <p id="videoLabel">Clique para selecionar vídeos ou fotos (pode selecionar vários)</p>
+          <input type="file" id="videoFile" multiple accept="video/*,image/*" onchange="uploadVideos(this)">
         </div>
       </div>
 

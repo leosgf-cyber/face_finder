@@ -466,7 +466,12 @@ def scan_frames(
     )
 
     results = {name: [] for name in references}
-    match_counter = [0]  # mutable so the helper can update it
+    # Continue match numbering across calls that share the same matches_dir
+    # (e.g. multi-video jobs, or videos followed by photos in scan_photo).
+    initial_match_count = 0
+    if matches_dir:
+        initial_match_count = len(list(Path(matches_dir).glob("match_*.jpg")))
+    match_counter = [initial_match_count]
 
     def _consume_face_result(frame_index, frame_file_path, faces, img_for_crop=None):
         """Compare each detected face against references, record matches.
@@ -647,6 +652,99 @@ def scan_frames(
         results[name].sort(key=lambda m: m["frame_number"])
 
     results = {name: matches for name, matches in results.items() if matches}
+    return results
+
+
+def scan_photo(
+    photo_path: str,
+    references: dict,
+    tolerance: float = 0.6,
+    matches_dir: str | None = None,
+    progress_callback=None,
+) -> dict:
+    """Scan a single photo for known faces. Returns {name: [match_entry, ...]}.
+
+    Match entry shape matches scan_frames; timestamp is None for photos.
+    The progress callback (if any) fires exactly once with frames_done=1,
+    frames_total=1, and the full list of new matches.
+    """
+    photo_path_obj = Path(photo_path)
+    img = cv2.imread(photo_path)
+    if img is None:
+        print(f"Não foi possível ler '{photo_path_obj.name}'")
+        if progress_callback is not None:
+            progress_callback({"frames_done": 1, "frames_total": 1, "new_matches": []})
+        return {}
+
+    if matches_dir:
+        Path(matches_dir).mkdir(parents=True, exist_ok=True)
+
+    all_known_encodings = []
+    all_known_names = []
+    for name, encodings in references.items():
+        for enc in encodings:
+            all_known_encodings.append(enc)
+            all_known_names.append(name)
+    all_known_encodings = np.array(all_known_encodings)
+    per_person_tolerance = _compute_per_person_tolerance(references, tolerance)
+
+    detector, shape_predictor, face_encoder = _get_detector_and_encoder()
+
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    small_rgb, scale = _resize_for_detection(rgb)
+    detected = _detect_faces(small_rgb, detector)
+
+    # Continue match numbering across calls that share matches_dir.
+    match_counter = 0
+    if matches_dir:
+        match_counter = len(list(Path(matches_dir).glob("match_*.jpg")))
+
+    results = {}
+    new_matches = []
+
+    for face in detected:
+        if scale != 1.0:
+            orig_face = dlib.rectangle(
+                int(face.left() / scale),
+                int(face.top() / scale),
+                int(face.right() / scale),
+                int(face.bottom() / scale),
+            )
+        else:
+            orig_face = face
+        shape = shape_predictor(rgb, orig_face)
+        encoding = np.array(face_encoder.compute_face_descriptor(rgb, shape))
+
+        distances = np.linalg.norm(all_known_encodings - encoding, axis=1)
+        best_idx = int(np.argmin(distances))
+        matched_name = all_known_names[best_idx]
+        if distances[best_idx] > per_person_tolerance[matched_name]:
+            continue
+
+        entry = {
+            "frame": photo_path_obj.name,
+            "frame_number": 0,
+            "timestamp": None,
+            "confidence": round(1 - float(distances[best_idx]), 3),
+        }
+
+        if matches_dir:
+            crop = _crop_face(img, orig_face, padding=0.5)
+            match_filename = f"match_{match_counter:04d}.jpg"
+            cv2.imwrite(str(Path(matches_dir) / match_filename), crop)
+            entry["match_image"] = match_filename
+            match_counter += 1
+
+        results.setdefault(matched_name, []).append(entry)
+        new_matches.append(entry)
+
+    if progress_callback is not None:
+        progress_callback({
+            "frames_done": 1,
+            "frames_total": 1,
+            "new_matches": new_matches,
+        })
+
     return results
 
 

@@ -836,11 +836,15 @@ async function loadVideos() {
   videos.forEach(function (v) {
     const card = document.createElement("div");
     card.className = "video-card";
+    var iconHtml = v.type === "photo"
+      ? '<div class="video-icon" title="Foto">&#128247;</div>'
+      : '<div class="video-icon" title="Vídeo">&#9654;</div>';
+    var typeLabel = v.type === "photo" ? "Foto" : "Vídeo";
     card.innerHTML =
-      '<div class="video-icon">&#9654;</div>' +
+      iconHtml +
       '<div class="person-info">' +
       '<div class="name">' + escapeHtml(v.filename) + '</div>' +
-      '<div class="count">' + v.size_mb + ' MB</div>' +
+      '<div class="count">' + typeLabel + ' · ' + v.size_mb + ' MB</div>' +
       '</div>' +
       '<button class="btn btn-danger" onclick="deleteVideo(\'' +
       escapeHtml(v.filename).replace(/'/g, "\\'") +
@@ -854,7 +858,7 @@ async function uploadVideos(input) {
 
   const area = document.getElementById("videoArea");
   const label = document.getElementById("videoLabel");
-  label.innerHTML = '<span class="filename">Enviando ' + input.files.length + ' video(s)...</span>';
+  label.innerHTML = '<span class="filename">Enviando ' + input.files.length + ' arquivo(s)...</span>';
   area.classList.add("has-file");
 
   const formData = new FormData();
@@ -865,7 +869,7 @@ async function uploadVideos(input) {
   const res = await fetch("/api/videos", { method: "POST", body: formData });
   const data = await res.json();
 
-  label.textContent = "Clique para selecionar vídeos (pode selecionar vários)";
+  label.textContent = "Clique para selecionar vídeos ou fotos (pode selecionar vários)";
   area.classList.remove("has-file");
   input.value = "";
 
@@ -888,27 +892,34 @@ async function loadVideoFolderFiles(input) {
 
   var folderName = input.files[0].webkitRelativePath.split("/")[0];
   var videoExts = ["mp4", "mov", "avi", "mkv", "webm", "m4v"];
+  var photoExts = ["jpg", "jpeg", "png", "bmp", "webp"];
 
-  var videoCount = 0;
+  var videoCount = 0, photoCount = 0;
   var totalSize = 0;
   for (var i = 0; i < input.files.length; i++) {
     var ext = input.files[i].name.split(".").pop().toLowerCase();
     if (videoExts.indexOf(ext) !== -1) {
       videoCount++;
       totalSize += input.files[i].size;
+    } else if (photoExts.indexOf(ext) !== -1) {
+      photoCount++;
+      totalSize += input.files[i].size;
     }
   }
 
-  if (videoCount === 0) {
-    alert("Nenhum video encontrado na pasta.");
+  if (videoCount === 0 && photoCount === 0) {
+    alert("Nenhum vídeo ou foto encontrado na pasta.");
     input.value = "";
     return;
   }
 
   var sizeMB = (totalSize / (1024 * 1024)).toFixed(0);
+  var parts = [];
+  if (videoCount > 0) parts.push(videoCount + " vídeo(s)");
+  if (photoCount > 0) parts.push(photoCount + " foto(s)");
   var msg = 'Pasta selecionada: "' + folderName + '"\n\n' +
-    videoCount + " video(s) encontrado(s) (" + sizeMB + " MB total).\n\n" +
-    "Deseja carregar esses videos?";
+    parts.join(" + ") + " encontrado(s) (" + sizeMB + " MB total).\n\n" +
+    "Deseja carregar?";
 
   if (!confirm(msg)) {
     input.value = "";
@@ -921,13 +932,14 @@ async function loadVideoFolderFiles(input) {
   var formData = new FormData();
   for (var i = 0; i < input.files.length; i++) {
     var ext = input.files[i].name.split(".").pop().toLowerCase();
-    if (videoExts.indexOf(ext) !== -1) {
+    if (videoExts.indexOf(ext) !== -1 || photoExts.indexOf(ext) !== -1) {
       formData.append("videos", input.files[i]);
     }
   }
 
+  var totalCount = videoCount + photoCount;
   document.getElementById("videoFolderProgress").textContent =
-    "Enviando " + videoCount + " video(s)...";
+    "Enviando " + totalCount + " arquivo(s)...";
 
   var res = await fetch("/api/load-videos-folder", { method: "POST", body: formData });
   var data = await res.json();
@@ -939,7 +951,7 @@ async function loadVideoFolderFiles(input) {
   }
 
   document.getElementById("videoFolderProgress").textContent =
-    data.count + " video(s) carregado(s).";
+    data.count + " arquivo(s) carregado(s).";
   input.value = "";
   loadVideos();
 }
@@ -1030,8 +1042,11 @@ function pollJob(jobId) {
         const row = document.createElement("div");
         row.className = "live-match-row";
         row.style.cssText = "padding: 4px 0; font-size: 13px; color: #ccc;";
-        row.textContent =
-          (m.video || "") + " · " + (m.timestamp || "") + " · " + (m.frame || "");
+        var parts = [];
+        if (m.video) parts.push(m.video);
+        if (m.timestamp) parts.push(m.timestamp);
+        if (m.frame && m.frame !== m.video) parts.push(m.frame);
+        row.textContent = parts.join(" · ");
         liveMatchBox.appendChild(row);
       }
       window.__lastSeenMatchIndex = job.live_matches.length;
