@@ -606,6 +606,9 @@ def start_processing():
         "videos": video_names,
         "results": None,
         "partial_matches": 0,
+        "frames_done": 0,
+        "frames_total": 0,
+        "live_matches": [],
     }
 
     thread = threading.Thread(
@@ -629,12 +632,36 @@ def _process_job(job_id, video_paths, video_names, fps, tolerance, start, end):
         all_results = {}
 
         for idx, (video_path, video_name) in enumerate(zip(video_paths, video_names)):
-            jobs[job_id]["progress"] = f"Extraindo frames: {video_name} ({idx + 1}/{len(video_paths)})..."
+            jobs[job_id]["progress"] = (
+                f"Extraindo frames: {video_name} ({idx + 1}/{len(video_paths)})..."
+            )
             frames_dir = str(RESULTS_DIR / f"frames_{job_id}_{idx}")
             extract_frames(video_path, frames_dir, fps, start, end)
 
-            jobs[job_id]["progress"] = f"Varrendo: {video_name} ({idx + 1}/{len(video_paths)})..."
-            results = scan_frames(frames_dir, refs, tolerance, fps, matches_dir)
+            jobs[job_id]["progress"] = (
+                f"Varrendo: {video_name} ({idx + 1}/{len(video_paths)})..."
+            )
+            # Reset per-video frame counter; live_matches accumulates across videos.
+            jobs[job_id]["frames_done"] = 0
+            jobs[job_id]["frames_total"] = 0
+
+            def _on_progress(payload, _video_name=video_name):
+                jobs[job_id]["frames_done"] = payload["frames_done"]
+                jobs[job_id]["frames_total"] = payload["frames_total"]
+                for m in payload["new_matches"]:
+                    m_with_video = dict(m)
+                    m_with_video["video"] = _video_name
+                    jobs[job_id]["live_matches"].append(m_with_video)
+                jobs[job_id]["partial_matches"] = len(jobs[job_id]["live_matches"])
+
+            results = scan_frames(
+                frames_dir,
+                refs,
+                tolerance,
+                fps,
+                matches_dir,
+                progress_callback=_on_progress,
+            )
 
             for name, matches in results.items():
                 for m in matches:
@@ -646,9 +673,11 @@ def _process_job(job_id, video_paths, video_names, fps, tolerance, start, end):
             total_matches = sum(len(v) for v in all_results.values())
             people_found = len(all_results)
             jobs[job_id]["partial_matches"] = total_matches
-            jobs[job_id]["progress"] = f"Video {idx + 1}/{len(video_paths)} concluido | {people_found} pessoa(s), {total_matches} match(es)"
+            jobs[job_id]["progress"] = (
+                f"Video {idx + 1}/{len(video_paths)} concluido | "
+                f"{people_found} pessoa(s), {total_matches} match(es)"
+            )
 
-            # Auto-cleanup: remove frames directory after scanning
             try:
                 shutil.rmtree(frames_dir)
             except Exception:
